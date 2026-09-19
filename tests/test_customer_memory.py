@@ -1,22 +1,23 @@
-"""Müşteri Hafızası — customer_key as context/prior/evidence only."""
+﻿"""Müşteri Hafızası — customer_key as context/prior/evidence only."""
 from __future__ import annotations
 
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-
-# conftest stubs load via pytest; for unittest ensure path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-IMPL = ROOT / "cm_impl"
-if str(IMPL) not in sys.path:
-    sys.path.insert(0, str(IMPL))
-if str(Path(__file__).parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).parent))
-
-import conftest  # noqa: F401  — install stubs
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# Optional stubs only if full deps missing (kept out of package import name)
+_stubs = Path(__file__).resolve().parent / "_cm_conftest_stubs.py"
+if _stubs.is_file():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_cm_conftest_stubs", _stubs)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
 
 from core.concept_registry import (
     _conn,
@@ -37,7 +38,6 @@ from core.customer_discovery import (
 from core.learned_concept_search import collect_learned_hits, example_file_ids
 from core.teach_me import resolve_active_customer_key
 
-
 class TestCustomerMemory(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -51,30 +51,30 @@ class TestCustomerMemory(unittest.TestCase):
     def test_customer_discovery_scope_still_works(self):
         reg = CustomerRegistry()
         triples = [
-            (r"\\server\imalat2\Ünal Tekstil\koleksiyon\a.tif", r"\\server\imalat2", 1),
-            (r"\\server\imalat2\Ünal Tekstil\Numuneler\b.tif", r"\\server\imalat2", 1),
+            (r"\\server\imalat2\Ãœnal Tekstil\koleksiyon\a.tif", r"\\server\imalat2", 1),
+            (r"\\server\imalat2\Ãœnal Tekstil\Numuneler\b.tif", r"\\server\imalat2", 1),
             (r"\\server\imalat2\Leydi Tekstil\c.tif", r"\\server\imalat2", 1),
         ]
         reg.discover_from_paths(triples)
         names = {normalize_customer_key(n) for n in reg.names()}
-        self.assertIn(normalize_customer_key("Ünal Tekstil"), names)
-        prefixes = reg.scope_prefixes_for("Ünal Tekstil")
+        self.assertIn(normalize_customer_key("Ãœnal Tekstil"), names)
+        prefixes = reg.scope_prefixes_for("Ãœnal Tekstil")
         self.assertTrue(prefixes)
         self.assertTrue(
             path_under_any_prefix(
-                r"\\server\imalat2\Ünal Tekstil\koleksiyon\a.tif", prefixes
+                r"\\server\imalat2\Ãœnal Tekstil\koleksiyon\a.tif", prefixes
             )
         )
 
     def test_norm_customer_key_empty_is_global(self):
         self.assertEqual(_norm_customer_key(""), "")
         self.assertEqual(_norm_customer_key(None), "")
-        self.assertTrue(_norm_customer_key("Ünal Tekstil"))
+        self.assertTrue(_norm_customer_key("Ãœnal Tekstil"))
 
     def test_resolve_active_customer_key_explicit(self):
-        ck = resolve_active_customer_key("Ünal Tekstil")
+        ck = resolve_active_customer_key("Ãœnal Tekstil")
         self.assertTrue(ck)
-        self.assertEqual(ck, normalize_customer_key("Ünal Tekstil"))
+        self.assertEqual(ck, normalize_customer_key("Ãœnal Tekstil"))
 
     # --- customer context read with customer_key ---
     def test_customer_context_read_with_customer_key(self):
@@ -83,22 +83,22 @@ class TestCustomerMemory(unittest.TestCase):
             "Leopar",
             file_id=10,
             file_path="/unal/red_leo.tif",
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         self.assertGreater(cid, 0)
         rows = example_rows_for_concept(
-            self.db_path, cid, customer_key="Ünal Tekstil"
+            self.db_path, cid, customer_key="Ãœnal Tekstil"
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["file_id"], 10)
         self.assertEqual(
-            rows[0]["customer_key"], _norm_customer_key("Ünal Tekstil")
+            rows[0]["customer_key"], _norm_customer_key("Ãœnal Tekstil")
         )
 
     # --- same concept keeps global canonical ---
     def test_same_concept_keeps_global_canonical(self):
         cid1 = learn(
-            self.db_path, "Leopar", file_id=1, customer_key="Ünal Tekstil"
+            self.db_path, "Leopar", file_id=1, customer_key="Ãœnal Tekstil"
         )
         cid2 = learn(self.db_path, "Leopar", file_id=2, customer_key="")
         self.assertEqual(cid1, cid2)
@@ -115,12 +115,12 @@ class TestCustomerMemory(unittest.TestCase):
             "Leopar",
             file_id=2,
             file_path="/unal/x.tif",
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         # Teaching under customer must NOT rename / fork canonical
         cans = [r["canonical"] for r in concepts(self.db_path)]
         self.assertEqual(cans.count("Leopar"), 1)
-        self.assertNotIn("Ünal Tekstil Leopar", cans)
+        self.assertNotIn("Ãœnal Tekstil Leopar", cans)
         self.assertNotIn("unal tekstil", " ".join(cans).lower())
 
     # --- user teaching beats customer context where modeled ---
@@ -137,20 +137,20 @@ class TestCustomerMemory(unittest.TestCase):
             file_id=200,
             role="positive",
             source="user",
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         # Without customer: only global user teaching
         global_ids = example_file_ids(self.db_path, cid, user_only=True, customer_key="")
         self.assertEqual(global_ids, [100])
         # With customer: customer first, then global fallback (user still present)
         scoped = example_file_ids(
-            self.db_path, cid, user_only=True, customer_key="Ünal Tekstil"
+            self.db_path, cid, user_only=True, customer_key="Ãœnal Tekstil"
         )
         self.assertEqual(scoped[0], 200)
         self.assertIn(100, scoped)
         # Soft-only customer ids helper excludes global
         only_cust = customer_example_file_ids(
-            self.db_path, cid, customer_key="Ünal Tekstil"
+            self.db_path, cid, customer_key="Ãœnal Tekstil"
         )
         self.assertEqual(only_cust, [200])
 
@@ -172,29 +172,29 @@ class TestCustomerMemory(unittest.TestCase):
             self.db_path,
             "Leopar",
             file_id=33,
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         pack = collect_learned_hits(
-            self.db_path, "leopar", customer_key="Ünal Tekstil"
+            self.db_path, "leopar", customer_key="Ãœnal Tekstil"
         )
         exact = pack.get("exact_ids") or []
         self.assertTrue(exact)
         # Customer example preferred (listed first)
         self.assertEqual(exact[0], 33)
         self.assertIn(11, exact)
-        self.assertEqual(pack.get("customer_key"), _norm_customer_key("Ünal Tekstil"))
+        self.assertEqual(pack.get("customer_key"), _norm_customer_key("Ãœnal Tekstil"))
 
     # --- wrong customer does not use another customer's examples ---
     def test_wrong_customer_does_not_use_other_customer_examples(self):
         learn(
-            self.db_path, "Leopar", file_id=44, customer_key="Ünal Tekstil"
+            self.db_path, "Leopar", file_id=44, customer_key="Ãœnal Tekstil"
         )
         learn(
             self.db_path, "Leopar", file_id=55, customer_key="Leydi Tekstil"
         )
         learn(self.db_path, "Leopar", file_id=66, customer_key="")
         ids_unal = example_file_ids(
-            self.db_path, concepts(self.db_path)[0]["id"], customer_key="Ünal Tekstil"
+            self.db_path, concepts(self.db_path)[0]["id"], customer_key="Ãœnal Tekstil"
         )
         self.assertIn(44, ids_unal)
         self.assertIn(66, ids_unal)
@@ -212,14 +212,14 @@ class TestCustomerMemory(unittest.TestCase):
             "Leopar",
             file_id=7,
             file_path="/a.tif",
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         learn(
             self.db_path,
             "Leopar",
             file_id=7,
             file_path="/a.tif",
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         # Global row for same file is allowed (different customer_key)
         learn(
@@ -233,7 +233,7 @@ class TestCustomerMemory(unittest.TestCase):
         n_cust = c.execute(
             """SELECT COUNT(*) n FROM concept_examples
                WHERE concept_id=? AND file_id=? AND IFNULL(customer_key,'')=?""",
-            (cid, 7, _norm_customer_key("Ünal Tekstil")),
+            (cid, 7, _norm_customer_key("Ãœnal Tekstil")),
         ).fetchone()["n"]
         n_glob = c.execute(
             """SELECT COUNT(*) n FROM concept_examples
@@ -251,7 +251,7 @@ class TestCustomerMemory(unittest.TestCase):
             "Leopar",
             file_id=9,
             file_path="/p.tif",
-            customer_key="Ünal Tekstil",
+            customer_key="Ãœnal Tekstil",
         )
         # Re-open connection (simulates restart)
         ensure(self.db_path)
@@ -264,11 +264,11 @@ class TestCustomerMemory(unittest.TestCase):
         ).fetchone()
         c.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row["customer_key"], _norm_customer_key("Ünal Tekstil"))
+        self.assertEqual(row["customer_key"], _norm_customer_key("Ãœnal Tekstil"))
         self.assertEqual(int(row["file_id"]), 9)
 
     def test_migration_from_legacy_table_without_customer_key(self):
-        """Legacy UNIQUE(concept_id,file_id,role,file_path) → rebuild with scope."""
+        """Legacy UNIQUE(concept_id,file_id,role,file_path) â†’ rebuild with scope."""
         legacy = str(Path(self.tmp.name) / "legacy.db")
         c = sqlite3.connect(legacy)
         c.execute(
@@ -298,7 +298,7 @@ class TestCustomerMemory(unittest.TestCase):
         c.close()
         # Opening via _conn runs migration
         ensure(legacy)
-        learn(legacy, "Leopar", file_id=1, file_path="/g.tif", customer_key="Ünal Tekstil")
+        learn(legacy, "Leopar", file_id=1, file_path="/g.tif", customer_key="Ãœnal Tekstil")
         learn(legacy, "Leopar", file_id=1, file_path="/g.tif", customer_key="")
         c = _conn(legacy)
         cols = {str(r[1]) for r in c.execute("PRAGMA table_info(concept_examples)")}
@@ -311,13 +311,14 @@ class TestCustomerMemory(unittest.TestCase):
     def test_search_memory_scoped_query_key(self):
         from core.search_memory import scoped_query_key
 
-        a = scoped_query_key("kirmizi leopar", "Ünal Tekstil")
+        a = scoped_query_key("kirmizi leopar", "Ãœnal Tekstil")
         b = scoped_query_key("kirmizi leopar", "Leydi Tekstil")
         c = scoped_query_key("kirmizi leopar", "")
         self.assertNotEqual(a, b)
         self.assertNotEqual(a, c)
-        self.assertTrue(a.endswith("cust:" + normalize_customer_key("Ünal Tekstil")) or "cust:" in a)
+        self.assertTrue(a.endswith("cust:" + normalize_customer_key("Ãœnal Tekstil")) or "cust:" in a)
 
 
 if __name__ == "__main__":
     unittest.main()
+
