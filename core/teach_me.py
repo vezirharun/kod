@@ -21,6 +21,35 @@ POOL_SCAN_LIMIT = 400
 POOL_SHOW_LIMIT = 80
 
 
+def resolve_active_customer_key(explicit: str = "") -> str:
+    """Stamp for concept_examples. Empty = global. Does not rename concepts."""
+    raw = " ".join(str(explicit or "").strip().split())
+    if not raw:
+        try:
+            from core.settings import AppSettings
+
+            settings = AppSettings.load() if hasattr(AppSettings, "load") else None
+            if settings is None:
+                settings = AppSettings()
+            raw = " ".join(str(getattr(settings, "customer_filter", "") or "").strip().split())
+        except Exception:
+            raw = ""
+    if not raw:
+        return ""
+    try:
+        from core.concept_registry import _norm_customer_key
+
+        return _norm_customer_key(raw)
+    except Exception:
+        try:
+            from core.customer_discovery import normalize_customer_key
+
+            return normalize_customer_key(raw) or raw.casefold()
+        except Exception:
+            return raw.casefold()
+
+
+
 @dataclass
 class TeachMeCard:
     file_id: int
@@ -836,15 +865,18 @@ def record_verified_concept_examples(
     label: str,
     *,
     parent: str = "",
+    customer_key: str = "",
 ) -> dict[str, int]:
     """concept_registry + concept_examples + CLIP. Dosya/indeks yazmaz.
 
     Stage 3: TR/EN leaf translation aliases + category_memory bridge (registry-first).
+    Optional customer_key stamps examples only — never renames global canonical.
     """
     name = " ".join(str(label or "").strip().split())
     ids = [int(x) for x in file_ids if int(x) > 0]
     if not name or not ids:
         return {"taught": 0, "concept_id": 0}
+    ck = resolve_active_customer_key(customer_key)
     concept_id = 0
     n = 0
     paths = _paths_for_files(db, ids)
@@ -880,6 +912,7 @@ def record_verified_concept_examples(
             embedding=blob,
             embedding_backend="clip" if blob else "",
             aliases=alias_list,
+            customer_key=ck,
         )
         n += 1
     try:
@@ -897,6 +930,8 @@ def learn_from_metadata_edit(
     file_id: int,
     overlay: dict[str, Any] | None,
     previous: dict[str, Any] | None = None,
+    *,
+    customer_key: str = "",
 ) -> dict[str, int]:
     """Düzenle Kaydet: overlay zaten yazılır; burada yalnızca anlamlı kavram örneği.
 
@@ -923,6 +958,7 @@ def learn_from_metadata_edit(
         [fid],
         label,
         parent=str(merged.get("parent") or ""),
+        customer_key=customer_key,
     )
     demoted = 0
     try:
@@ -1013,6 +1049,8 @@ def teach_files(
     file_ids: Iterable[int],
     label: str,
     overlay: dict[str, Any] | None = None,
+    *,
+    customer_key: str = "",
 ) -> dict[str, int]:
     """Verified examples + optional file classification. Does not retrain models."""
     applied = nonempty_overlay(overlay)
@@ -1028,6 +1066,7 @@ def teach_files(
         ids,
         name,
         parent=str(applied.get("parent") or ""),
+        customer_key=customer_key,
     )
     try:
         from core.user_feedback import UserFeedbackStore

@@ -499,10 +499,13 @@ def score_color_evidence_match(
 def apply_color_evidence_scoring(
     results: list[Any],
     query_text: str,
+    *,
+    customer_key: str = "",
 ) -> list[Any]:
     """Soft re-score by query colors vs file color evidence. Concept identity untouched.
 
     Skips rows already scored by query_attribute_intel color channel to avoid double count.
+    Optional customer_key is accepted for chain parity (color evidence itself is global).
     """
     if not results or not (query_text or "").strip():
         return results
@@ -551,6 +554,9 @@ def apply_color_evidence_scoring(
                 rec.score_percent = round(new * 100, 1)
             meta["before"] = round(old, 4)
             meta["after"] = round(new, 4)
+        if customer_key:
+            meta = dict(meta)
+            meta["customer_key"] = " ".join(str(customer_key).strip().split())
         dbg["color_evidence_score"] = meta
         rec.debug = dbg
     return results

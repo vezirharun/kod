@@ -251,6 +251,21 @@ def _norm_query(text: str) -> str:
     return " ".join(folded.split())
 
 
+def scoped_query_key(text: str, customer: str = "") -> str:
+    """Include customer in overlay/rewrite keys so scopes do not leak across customers."""
+    base = _norm_query(text)
+    ck = " ".join(str(customer or "").strip().split())
+    if not ck:
+        return base
+    try:
+        from core.customer_discovery import normalize_customer_key
+
+        ck = normalize_customer_key(ck) or ck.casefold()
+    except Exception:
+        ck = ck.casefold()
+    return f"{base}::cust:{ck}" if base else f"::cust:{ck}"
+
+
 def _boost_for_action(action: str) -> float:
     a = str(action or "").strip().lower()
     if a in {"same_pattern", "promote", "correct", "ai_category_correct", "dogru", "doğru"}:
@@ -264,21 +279,28 @@ def _boost_for_action(action: str) -> float:
     return 0.0
 
 
-def apply_query_memory(db_path: str, text: str) -> tuple[str, dict[str, Any]]:
+def apply_query_memory(
+    db_path: str, text: str, *, customer: str = ""
+) -> tuple[str, dict[str, Any]]:
     """Search-time rewrite from search_memory.db (typo/synonym/brand)."""
     raw = str(text or "").strip()
-    meta: dict[str, Any] = {"memory_rewrite": "", "memory_brand": ""}
+    meta: dict[str, Any] = {"memory_rewrite": "", "memory_brand": "", "memory_customer": ""}
     if not raw or not db_path:
         return raw, meta
     src = _norm_query(raw)
+    scoped = scoped_query_key(raw, customer) if customer else src
+    if customer:
+        meta["memory_customer"] = " ".join(str(customer).strip().split())
     mem = get_search_memory(db_path)
     dst = ""
     with mem._connect() as con:
-        row = con.execute(
-            "SELECT dst FROM query_rewrites WHERE src=?", (src,)
-        ).fetchone()
-        if row:
-            dst = str(row[0] or "").strip()
+        for key in ((scoped, src) if scoped != src else (src,)):
+            row = con.execute(
+                "SELECT dst FROM query_rewrites WHERE src=?", (key,)
+            ).fetchone()
+            if row:
+                dst = str(row[0] or "").strip()
+                break
     if dst and dst.lower() != src:
         meta["memory_rewrite"] = dst
         raw = dst
@@ -294,9 +316,9 @@ def apply_query_memory(db_path: str, text: str) -> tuple[str, dict[str, Any]]:
 
 
 def remember_query_rewrite(
-    db_path: str, src: str, dst: str, *, kind: str = "typo"
+    db_path: str, src: str, dst: str, *, kind: str = "typo", customer: str = ""
 ) -> bool:
-    a = _norm_query(src)
+    a = scoped_query_key(src, customer) if customer else _norm_query(src)
     b = " ".join(str(dst or "").strip().split())
     if not db_path or not a or not b or a == _norm_query(b):
         return False
@@ -548,10 +570,11 @@ def record_feedback_overlay(
     *,
     label: str = "",
     extra: dict[str, Any] | None = None,
+    customer: str = "",
 ) -> int:
     if not db_path or int(file_id or 0) <= 0:
         return 0
-    q = _norm_query(query_key)
+    q = scoped_query_key(query_key, customer) if customer else _norm_query(query_key)
     if not q:
         return 0
     delta = _boost_for_action(action)
@@ -602,8 +625,10 @@ def record_feedback_overlay(
         return int(cur.lastrowid or 0)
 
 
-def overlay_adjustments(db_path: str, query_key: str) -> dict[int, float]:
-    q = _norm_query(query_key)
+def overlay_adjustments(
+    db_path: str, query_key: str, *, customer: str = ""
+) -> dict[int, float]:
+    q = scoped_query_key(query_key, customer) if customer else _norm_query(query_key)
     if not db_path or not q:
         return {}
     mem = get_search_memory(db_path)
@@ -636,8 +661,8 @@ def clear_overlay_actions(db_path: str, file_id: int, actions: tuple[str, ...]) 
         return int(cur.rowcount or 0)
 
 
-def overlay_wrong_ids(db_path: str, query_key: str) -> set[int]:
-    q = _norm_query(query_key)
+def overlay_wrong_ids(db_path: str, query_key: str, *, customer: str = "") -> set[int]:
+    q = scoped_query_key(query_key, customer) if customer else _norm_query(query_key)
     if not db_path or not q:
         return set()
     mem = get_search_memory(db_path)
@@ -650,8 +675,8 @@ def overlay_wrong_ids(db_path: str, query_key: str) -> set[int]:
     return {int(r[0]) for r in rows}
 
 
-def overlay_positive_ids(db_path: str, query_key: str) -> set[int]:
-    q = _norm_query(query_key)
+def overlay_positive_ids(db_path: str, query_key: str, *, customer: str = "") -> set[int]:
+    q = scoped_query_key(query_key, customer) if customer else _norm_query(query_key)
     if not db_path or not q:
         return set()
     mem = get_search_memory(db_path)

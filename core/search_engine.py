@@ -889,7 +889,7 @@ class SearchEngine:
                 from core.search_memory import apply_query_memory
 
                 rewritten, mem_meta = apply_query_memory(
-                    self.settings.db_path, query.text
+                    self.settings.db_path, query.text, customer=customer
                 )
                 if rewritten:
                     query.text = rewritten
@@ -2446,9 +2446,10 @@ class SearchEngine:
             from core.search_memory import overlay_adjustments, overlay_wrong_ids
 
             dbp = getattr(self.settings, "db_path", "")
-            for fid, delta in overlay_adjustments(dbp, text).items():
+            _cust = str(getattr(self, "_active_search_customer", "") or "")
+            for fid, delta in overlay_adjustments(dbp, text, customer=_cust).items():
                 feedback_adj[fid] = feedback_adj.get(fid, 0.0) + float(delta)
-            wrong_ids |= overlay_wrong_ids(dbp, text)
+            wrong_ids |= overlay_wrong_ids(dbp, text, customer=_cust)
         except Exception:
             pass
 
@@ -2695,6 +2696,7 @@ class SearchEngine:
             threshold if threshold is not None else self.settings.similarity_threshold
         )
         customer = customer or self.settings.customer_filter
+        self._active_search_customer = str(customer or "").strip()
         text = (text or "").strip()
         if not text:
             return []
@@ -2702,7 +2704,9 @@ class SearchEngine:
         try:
             from core.search_memory import apply_query_memory
 
-            text, mem_meta = apply_query_memory(self.settings.db_path, text)
+            text, mem_meta = apply_query_memory(
+                self.settings.db_path, text, customer=customer
+            )
             self._last_memory_meta = dict(mem_meta or {})
         except Exception:
             self._last_memory_meta = {}
@@ -3506,6 +3510,7 @@ class SearchEngine:
                 effective_text,
                 db=self.db,
                 faiss_store=getattr(self, "faiss", None),
+                customer_key=str(customer or "").strip(),
             ) or {}
             self._last_learned_concept = learned_pack
             extra_learned = [
@@ -4080,6 +4085,7 @@ class SearchEngine:
                     index_db=str(getattr(self.settings, "db_path", "") or ""),
                     analysis=_analysis,
                     customer_registry=self._customer_registry_cached(),
+                    customer=str(customer or "").strip(),
                 )
             except Exception:
                 # Fallback: legacy 2B then 2A if chain import/runtime fails.
@@ -4335,9 +4341,11 @@ class SearchEngine:
             wrong: set[int] = set()
             dbp = getattr(self.settings, "db_path", "")
             for qk in qkeys:
-                for fid, delta in overlay_adjustments(dbp, qk).items():
+                for fid, delta in overlay_adjustments(
+                    dbp, qk, customer=str(customer or "")
+                ).items():
                     adj[fid] = adj.get(fid, 0.0) + float(delta)
-                wrong |= overlay_wrong_ids(dbp, qk)
+                wrong |= overlay_wrong_ids(dbp, qk, customer=str(customer or ""))
             if adj or wrong:
                 kept = []
                 for r in results:

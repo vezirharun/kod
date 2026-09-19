@@ -440,35 +440,62 @@ def resolve_learned_concept(db_path: str, query: str) -> dict[str, Any] | None:
 
 
 def example_file_ids(
-    db_path: str, concept_id: int, *, user_only: bool = False
+    db_path: str,
+    concept_id: int,
+    *,
+    user_only: bool = False,
+    customer_key: str = "",
 ) -> list[int]:
+    """Positive example file ids. With customer_key: prefer scoped, then global.
+
+    Never includes another customer's examples. Global identity stays intact.
+    """
     out: list[int] = []
     seen: set[int] = set()
+    ck = ""
     try:
-        from core.concept_registry import _conn
+        from core.concept_registry import _norm_customer_key, example_rows_for_concept
 
-        c = _conn(db_path)
-        if user_only:
-            rows = c.execute(
-                """SELECT DISTINCT file_id FROM concept_examples
-                   WHERE concept_id=? AND file_id>0 AND role='positive'
-                     AND IFNULL(source,'user') NOT IN ('auto','autonomous','candidate')""",
-                (int(concept_id),),
-            ).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT DISTINCT file_id FROM concept_examples "
-                "WHERE concept_id=? AND file_id>0 AND role='positive'",
-                (int(concept_id),),
-            ).fetchall()
-        c.close()
+        ck = _norm_customer_key(customer_key)
+        rows = example_rows_for_concept(
+            db_path,
+            int(concept_id),
+            role="positive",
+            user_only=user_only,
+            customer_key=ck,
+        )
         for r in rows:
-            fid = int(r["file_id"] or 0)
+            fid = int(r.get("file_id") or 0)
             if fid > 0 and fid not in seen:
                 seen.add(fid)
                 out.append(fid)
     except Exception:
-        pass
+        # Legacy fallback (no customer column / helper)
+        try:
+            from core.concept_registry import _conn
+
+            c = _conn(db_path)
+            if user_only:
+                rows = c.execute(
+                    """SELECT DISTINCT file_id FROM concept_examples
+                       WHERE concept_id=? AND file_id>0 AND role='positive'
+                         AND IFNULL(source,'user') NOT IN ('auto','autonomous','candidate')""",
+                    (int(concept_id),),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT DISTINCT file_id FROM concept_examples "
+                    "WHERE concept_id=? AND file_id>0 AND role='positive'",
+                    (int(concept_id),),
+                ).fetchall()
+            c.close()
+            for r in rows:
+                fid = int(r["file_id"] or 0)
+                if fid > 0 and fid not in seen:
+                    seen.add(fid)
+                    out.append(fid)
+        except Exception:
+            pass
     if out:
         return out
     if user_only:
@@ -666,7 +693,15 @@ def collect_learned_hits(
     *,
     db=None,
     faiss_store=None,
+    customer_key: str = "",
 ) -> dict[str, Any]:
+    try:
+        from core.concept_registry import _norm_customer_key
+
+        _ck_out = _norm_customer_key(customer_key)
+    except Exception:
+        _ck_out = " ".join(str(customer_key or "").strip().split())
+    customer_key = _ck_out
     matches = match_taught_concepts(db_path, query)
     if not matches:
         hit = resolve_learned_concept(db_path, query)
@@ -725,9 +760,9 @@ def collect_learned_hits(
             sc = LEARNED_CHILD_SCORE
         if hierarchical and str(m.get("concept_type") or "") == "parent_group":
             # Parent shell örnekleri yoksa atla; child user evidence esas.
-            ids = example_file_ids(db_path, cid, user_only=True)
+            ids = example_file_ids(db_path, cid, user_only=True, customer_key=customer_key)
         else:
-            ids = example_file_ids(db_path, cid, user_only=use_user)
+            ids = example_file_ids(db_path, cid, user_only=use_user, customer_key=customer_key)
         soft_only = (not hierarchical) and leaf_exact and rel in ("related", "parent")
         if soft_only or (rel == "parent" and not hierarchical):
             for fid in ids:
@@ -794,6 +829,7 @@ def collect_learned_hits(
         "relations": [(m.get("canonical"), m.get("relation")) for m in matches],
         "boundary_negative_ids": sorted(neg_ids),
         "hierarchical_parent": hierarchical,
+        "customer_key": _ck_out,
     }
 
 

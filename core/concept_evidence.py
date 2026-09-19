@@ -92,21 +92,50 @@ def _conf(support: int, total: int) -> str:
     return "unknown"
 
 
-def _user_positive_rows(memory_db: str, concept_id: int) -> list[int]:
+def _user_positive_rows(
+    memory_db: str, concept_id: int, *, customer_key: str = ""
+) -> list[int]:
     if not memory_db or int(concept_id or 0) <= 0:
         return []
     try:
+        from core.concept_registry import example_rows_for_concept
+
+        rows = example_rows_for_concept(
+            memory_db,
+            int(concept_id),
+            role="positive",
+            user_only=True,
+            customer_key=customer_key,
+        )
+        return [int(r["file_id"]) for r in rows if int(r.get("file_id") or 0) > 0]
+    except Exception:
+        pass
+    try:
         conn = sqlite3.connect(memory_db)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT DISTINCT file_id FROM concept_examples
-            WHERE concept_id=? AND role='positive' AND file_id>0
-              AND IFNULL(source,'user') NOT IN ('auto','autonomous','candidate')
-            ORDER BY file_id
-            """,
-            (int(concept_id),),
-        ).fetchall()
+        ck = " ".join(str(customer_key or "").strip().split())
+        if ck:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT file_id FROM concept_examples
+                WHERE concept_id=? AND role='positive' AND file_id>0
+                  AND IFNULL(source,'user') NOT IN ('auto','autonomous','candidate')
+                  AND (IFNULL(customer_key,'')=? OR IFNULL(customer_key,'')='')
+                ORDER BY CASE WHEN IFNULL(customer_key,'')=? THEN 0 ELSE 1 END, file_id
+                """,
+                (int(concept_id), ck, ck),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT file_id FROM concept_examples
+                WHERE concept_id=? AND role='positive' AND file_id>0
+                  AND IFNULL(source,'user') NOT IN ('auto','autonomous','candidate')
+                  AND IFNULL(customer_key,'')=''
+                ORDER BY file_id
+                """,
+                (int(concept_id),),
+            ).fetchall()
         conn.close()
         return [int(r["file_id"]) for r in rows]
     except Exception:
@@ -213,6 +242,7 @@ def build_concept_evidence_profile(
     *,
     concept_id: int = 0,
     parent: str = "",
+    customer_key: str = "",
 ) -> ConceptEvidenceProfile:
     """Aggregate user-positive file evidence into a non-authoritative profile."""
     mem, pat = _resolve_paths(index_db)
@@ -238,7 +268,7 @@ def build_concept_evidence_profile(
         except Exception:
             cid = 0
     prof.concept_id = cid
-    fids = _user_positive_rows(mem, cid)
+    fids = _user_positive_rows(mem, cid, customer_key=customer_key)
     prof.file_ids = list(fids)
     prof.positive_count = len(fids)
     evidence = load_file_evidence(pat, fids)
@@ -528,10 +558,15 @@ def score_result_against_concept_evidence(
 _profile_cache: dict[str, ConceptEvidenceProfile] = {}
 
 
-def get_cached_profile(index_db: str, canonical: str) -> ConceptEvidenceProfile:
-    key = f"{index_db}::{canonical.casefold()}"
+def get_cached_profile(
+    index_db: str, canonical: str, *, customer_key: str = ""
+) -> ConceptEvidenceProfile:
+    ck = " ".join(str(customer_key or "").strip().split()).casefold()
+    key = f"{index_db}::{canonical.casefold()}::cust:{ck}"
     if key not in _profile_cache:
-        _profile_cache[key] = build_concept_evidence_profile(index_db, canonical)
+        _profile_cache[key] = build_concept_evidence_profile(
+            index_db, canonical, customer_key=customer_key
+        )
     return _profile_cache[key]
 
 
@@ -545,6 +580,7 @@ def apply_concept_evidence_scoring(
     *,
     index_db: str = "",
     canonical: str = "",
+    customer_key: str = "",
 ) -> list[Any]:
     """Soft re-score using concept evidence profile. Safe no-op if no DB/profile."""
     if not results or not (query_text or "").strip():
@@ -577,7 +613,7 @@ def apply_concept_evidence_scoring(
         return results
 
     try:
-        profile = get_cached_profile(index_db, name)
+        profile = get_cached_profile(index_db, name, customer_key=customer_key)
     except Exception:
         return results
     if profile.positive_count <= 0:
@@ -613,6 +649,45 @@ def apply_concept_evidence_scoring(
             "canonical": profile.canonical,
             "dna_available": profile.dna_available,
             "dna_missing": profile.dna_missing,
+            "customer_key": " ".join(str(customer_key or "").strip().split()),
         }
         rec.debug = dbg
+
+    # Thin customer soft bonus: prefer customer-stamped example file_ids (evidence only).
+    if customer_key and profile.concept_id:
+        try:
+            from core.concept_registry import customer_example_file_ids
+
+            cust_ids = set(
+                customer_example_file_ids(
+                    index_db, int(profile.concept_id), customer_key=customer_key
+                )
+            )
+        except Exception:
+            cust_ids = set()
+        if cust_ids:
+            for rec in results:
+                try:
+                    fid = int(getattr(rec, "file_id", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if fid not in cust_ids:
+                    continue
+                dbg = dict(getattr(rec, "debug", None) or {})
+                # USER LEARNING already stamped exact → do not fight it
+                if dbg.get("learned_concept_exact") or dbg.get("user_taught_positive"):
+                    continue
+                try:
+                    old = float(getattr(rec, "score", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                delta = 0.03
+                new = max(0.0, min(1.0, old + delta))
+                rec.score = new
+                if hasattr(rec, "score_percent"):
+                    rec.score_percent = round(new * 100, 1)
+                ce = dict(dbg.get("concept_evidence") or {})
+                ce["customer_soft_bonus"] = delta
+                dbg["concept_evidence"] = ce
+                rec.debug = dbg
     return results

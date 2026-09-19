@@ -18,6 +18,107 @@ def _norm(s):
         return concept_match_key(s)
     except Exception:
         return " ".join(str(s or "").strip().lower().split())
+
+def _norm_customer_key(customer_key):
+    """Empty string = global scope. Never merges into concept canonical."""
+    raw=" ".join(str(customer_key or "").strip().split())
+    if not raw:
+        return ""
+    try:
+        from core.customer_discovery import normalize_customer_key
+        return normalize_customer_key(raw) or raw.casefold()
+    except Exception:
+        return raw.casefold()
+
+def _migrate_concept_examples_customer_unique(c):
+    """Ensure UNIQUE includes customer_key (rebuild when legacy UNIQUE blocks scoped rows)."""
+    try:
+        cols=[str(r[1]) for r in c.execute("PRAGMA table_info(concept_examples)")]
+    except Exception:
+        return
+    if "customer_key" not in cols:
+        return
+    need_rebuild=False
+    try:
+        # Legacy table UNIQUE(concept_id,file_id,role,file_path) omits customer_key.
+        for idx in c.execute("PRAGMA index_list(concept_examples)"):
+            # idx: seq, name, unique, origin, partial
+            if not idx[2]:
+                continue
+            info=list(c.execute(f"PRAGMA index_info({idx[1]})"))
+            names=[]
+            for ii in info:
+                cid=int(ii[1])
+                if 0<=cid<len(cols):
+                    names.append(cols[cid])
+            if names and "customer_key" not in names and set(names)>= {"concept_id","file_id","role","file_path"}:
+                need_rebuild=True
+                break
+    except Exception:
+        need_rebuild=False
+    if not need_rebuild:
+        # Fresh DBs already have customer_key in CREATE UNIQUE — nothing to do.
+        # Also cover ALTER-only DBs with no unique index listing customer_key:
+        try:
+            c.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_concept_examples_scope
+                   ON concept_examples(concept_id,file_id,role,file_path,IFNULL(customer_key,''))"""
+            )
+        except sqlite3.OperationalError:
+            # Duplicate rows under old unique shape → must rebuild
+            need_rebuild=True
+        except Exception:
+            pass
+    if not need_rebuild:
+        try:
+            c.execute("UPDATE concept_examples SET customer_key='' WHERE customer_key IS NULL")
+        except Exception:
+            pass
+        return
+    # Rebuild with scoped UNIQUE
+    c.execute("""CREATE TABLE IF NOT EXISTS concept_examples__cm(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, concept_id INTEGER NOT NULL,
+        file_id INTEGER DEFAULT 0, file_path TEXT DEFAULT '',
+        role TEXT NOT NULL, source TEXT DEFAULT 'user',
+        created_at TEXT DEFAULT '',
+        embedding BLOB,
+        embedding_dim INTEGER DEFAULT 0,
+        embedding_backend TEXT DEFAULT '',
+        customer_key TEXT DEFAULT '',
+        UNIQUE(concept_id,file_id,role,file_path,customer_key))""")
+    colset=set(cols)
+    sel_cols=["concept_id","file_id","file_path","role","source","created_at"]
+    for opt in ("embedding","embedding_dim","embedding_backend","customer_key"):
+        if opt in colset:
+            sel_cols.append(opt)
+    # Deduplicate by scoped key while preferring user source
+    rows=c.execute(
+        f"SELECT id, {', '.join(sel_cols)} FROM concept_examples ORDER BY "
+        "CASE WHEN IFNULL(source,'user')='user' THEN 0 ELSE 1 END, id ASC"
+    ).fetchall()
+    seen=set()
+    for r in rows:
+        d={k: r[k] for k in sel_cols}
+        if "customer_key" not in d:
+            d["customer_key"]=""
+        ck=str(d.get("customer_key") or "")
+        d["customer_key"]=ck
+        key=(int(d["concept_id"]), int(d.get("file_id") or 0), str(d.get("role") or ""),
+             str(d.get("file_path") or ""), ck)
+        if key in seen:
+            continue
+        seen.add(key)
+        use_cols=list(sel_cols) if "customer_key" in sel_cols else list(sel_cols)+["customer_key"]
+        placeholders=",".join("?"*len(use_cols))
+        c.execute(
+            f"INSERT OR IGNORE INTO concept_examples__cm({', '.join(use_cols)}) VALUES({placeholders})",
+            tuple(d.get(k,"") for k in use_cols),
+        )
+    c.execute("DROP TABLE concept_examples")
+    c.execute("ALTER TABLE concept_examples__cm RENAME TO concept_examples")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_concept_examples ON concept_examples(concept_id,role)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_concept_examples_customer ON concept_examples(concept_id,customer_key,role)")
+
 def _write_path(db_path):
     """INDEX_FROZEN: persist concepts in search_memory.db, not patterns.db."""
     try:
@@ -45,7 +146,8 @@ def _conn(db_path):
         file_id INTEGER DEFAULT 0, file_path TEXT DEFAULT '',
         role TEXT NOT NULL, source TEXT DEFAULT 'user',
         created_at TEXT DEFAULT '',
-        UNIQUE(concept_id,file_id,role,file_path))""")
+        customer_key TEXT DEFAULT '',
+        UNIQUE(concept_id,file_id,role,file_path,customer_key))""")
     c.execute("""CREATE TABLE IF NOT EXISTS concept_feedback(
         id INTEGER PRIMARY KEY AUTOINCREMENT, concept_id INTEGER NOT NULL,
         file_id INTEGER DEFAULT 0, role TEXT NOT NULL,
@@ -57,9 +159,15 @@ def _conn(db_path):
         ("embedding","BLOB"),
         ("embedding_dim","INTEGER DEFAULT 0"),
         ("embedding_backend","TEXT DEFAULT ''"),
+        ("customer_key","TEXT DEFAULT ''"),
     ):
         if name not in ex_cols:
             c.execute(f"ALTER TABLE concept_examples ADD COLUMN {name} {spec}")
+    _migrate_concept_examples_customer_unique(c)
+    try:
+        c.execute("CREATE INDEX IF NOT EXISTS idx_concept_examples_customer ON concept_examples(concept_id,customer_key,role)")
+    except Exception:
+        pass
     c.execute("""CREATE TABLE IF NOT EXISTS teach_me_dismissed(
         file_id INTEGER PRIMARY KEY,
         created_at TEXT DEFAULT '',
@@ -132,10 +240,11 @@ def upsert(db_path, canonical, *, concept_type="unknown", parent="", aliases=(),
     c.commit(); c.close(); return cid
 
 def add_example(db_path, concept_id, *, file_id=0, file_path="", role="positive", source="user",
-                embedding=None, embedding_backend=""):
+                embedding=None, embedding_backend="", customer_key=""):
     if not db_path or not concept_id: return False
     role="negative" if role=="negative" else "positive"
     src=_norm_source(source)
+    ck=_norm_customer_key(customer_key)
     blob=bytes(embedding) if embedding else None
     dim=0
     if blob:
@@ -144,11 +253,13 @@ def add_example(db_path, concept_id, *, file_id=0, file_path="", role="positive"
     fid=int(file_id or 0)
     fpath=str(file_path or "")
     # user her zaman kazanır; auto/candidate mevcut user satırını ezemez.
+    # Scope: aynı customer_key ('' = global) içinde bak.
     existing=c.execute(
         """SELECT id, source, file_path FROM concept_examples
            WHERE concept_id=? AND file_id=? AND role=?
+             AND IFNULL(customer_key,'')=?
            ORDER BY CASE WHEN IFNULL(source,'user')='user' THEN 0 ELSE 1 END, id ASC""",
-        (int(concept_id), fid, role),
+        (int(concept_id), fid, role, ck),
     ).fetchone()
     if existing:
         old_src=_norm_source(existing["source"])
@@ -160,35 +271,38 @@ def add_example(db_path, concept_id, *, file_id=0, file_path="", role="positive"
                 "UPDATE concept_examples SET source='user' WHERE id=?",
                 (int(existing["id"]),),
             )
-    # Aynı file için user satırı varsa (farklı path ile) auto/candidate yazma.
+    # Aynı file+scope için user satırı varsa (farklı path ile) auto/candidate yazma.
     if src!="user" and fid>0:
         user_row=c.execute(
             """SELECT id FROM concept_examples
                WHERE concept_id=? AND file_id=? AND role=?
+                 AND IFNULL(customer_key,'')=?
                  AND IFNULL(source,'user')='user'""",
-            (int(concept_id), fid, role),
+            (int(concept_id), fid, role, ck),
         ).fetchone()
         if user_row:
             c.close()
             return False
     c.execute("""INSERT OR IGNORE INTO concept_examples
-        (concept_id,file_id,file_path,role,source,created_at,embedding,embedding_dim,embedding_backend)
-        VALUES(?,?,?,?,?,?,?,?,?)""",
+        (concept_id,file_id,file_path,role,source,created_at,embedding,embedding_dim,embedding_backend,customer_key)
+        VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (int(concept_id),fid,fpath,role,src,_now(),
-         blob, dim, str(embedding_backend or "")))
+         blob, dim, str(embedding_backend or ""), ck))
     if blob:
         # Embedding yalnızca boşsa dolar; user satırını auto ile yeniden yazmaz.
         if src=="user":
             c.execute("""UPDATE concept_examples SET embedding=?, embedding_dim=?, embedding_backend=?
                 WHERE concept_id=? AND file_id=? AND role=? AND file_path=?
+                  AND IFNULL(customer_key,'')=?
                   AND (embedding IS NULL OR length(embedding)=0)""",
-                (blob, dim, str(embedding_backend or ""), int(concept_id), fid, role, fpath))
+                (blob, dim, str(embedding_backend or ""), int(concept_id), fid, role, fpath, ck))
         else:
             c.execute("""UPDATE concept_examples SET embedding=?, embedding_dim=?, embedding_backend=?
                 WHERE concept_id=? AND file_id=? AND role=? AND file_path=?
+                  AND IFNULL(customer_key,'')=?
                   AND IFNULL(source,'user')!='user'
                   AND (embedding IS NULL OR length(embedding)=0)""",
-                (blob, dim, str(embedding_backend or ""), int(concept_id), fid, role, fpath))
+                (blob, dim, str(embedding_backend or ""), int(concept_id), fid, role, fpath, ck))
     pos=c.execute("SELECT COUNT(*) n FROM concept_examples WHERE concept_id=? AND role='positive'",(concept_id,)).fetchone()["n"]
     neg=c.execute("SELECT COUNT(*) n FROM concept_examples WHERE concept_id=? AND role='negative'",(concept_id,)).fetchone()["n"]
     total=pos+neg
@@ -280,14 +394,16 @@ def user_positive_file_ids(db_path):
     return {int(r["file_id"]) for r in rows}
 
 def learn(db_path, label, *, file_id=0, file_path="", parent="", concept_type="attribute", role="positive", aliases=(),
-          embedding=None, embedding_backend="", source="user"):
+          embedding=None, embedding_backend="", source="user", customer_key=""):
     src=_norm_source(source)
     parent_name=" ".join(str(parent or "").strip().split())
     if parent_name and src=="user":
         ensure_parent_concept(db_path, parent_name, source="user")
+    # Canonical identity is always global — customer_key stamps examples only.
     cid=upsert(db_path,label,concept_type=concept_type,parent=parent_name,aliases=aliases,source=src)
     if cid: add_example(db_path,cid,file_id=file_id,file_path=file_path,role=role,source=src,
-                        embedding=embedding, embedding_backend=embedding_backend)
+                        embedding=embedding, embedding_backend=embedding_backend,
+                        customer_key=customer_key)
     return cid
 
 def ensure_parent_concept(db_path, parent_label, *, aliases=(), source="user"):
@@ -605,3 +721,62 @@ def negative_file_ids(db_path, concept_id):
         rows=[]
     c.close()
     return {int(r["file_id"]) for r in rows if int(r["file_id"] or 0)>0}
+
+def example_rows_for_concept(db_path, concept_id, *, role="positive", user_only=False, customer_key=""):
+    """Return example rows; when customer_key set, prefer that scope then fall back to global.
+
+    Never returns another customer's rows. Does not alter concept canonical identity.
+    """
+    cid=int(concept_id or 0)
+    if not db_path or cid<=0:
+        return []
+    ck=_norm_customer_key(customer_key)
+    c=_conn(db_path)
+    try:
+        sql="""SELECT file_id, file_path, source, IFNULL(customer_key,'') AS customer_key,
+                     embedding, embedding_dim, embedding_backend
+              FROM concept_examples
+              WHERE concept_id=? AND role=? AND file_id>0"""
+        params=[cid, role]
+        if user_only:
+            sql += " AND IFNULL(source,'user') NOT IN ('auto','autonomous','candidate')"
+        if ck:
+            sql += " AND (IFNULL(customer_key,'')=? OR IFNULL(customer_key,'')='')"
+            params.append(ck)
+        else:
+            # Global path: only unscoped examples (unchanged behavior)
+            sql += " AND IFNULL(customer_key,'')=''"
+        sql += """ ORDER BY CASE WHEN IFNULL(customer_key,'')=? THEN 0 ELSE 1 END,
+                         CASE WHEN IFNULL(source,'user')='user' THEN 0 ELSE 1 END, id ASC"""
+        params.append(ck)
+        rows=c.execute(sql, tuple(params)).fetchall()
+    except sqlite3.OperationalError:
+        rows=[]
+    c.close()
+    out=[]
+    seen=set()
+    for r in rows:
+        fid=int(r["file_id"] or 0)
+        if fid<=0 or fid in seen:
+            continue
+        seen.add(fid)
+        out.append({
+            "file_id": fid,
+            "file_path": str(r["file_path"] or ""),
+            "source": str(r["source"] or ""),
+            "customer_key": str(r["customer_key"] or ""),
+            "embedding": bytes(r["embedding"]) if r["embedding"] else None,
+            "embedding_dim": int(r["embedding_dim"] or 0),
+            "embedding_backend": str(r["embedding_backend"] or ""),
+        })
+    return out
+
+def customer_example_file_ids(db_path, concept_id, *, customer_key="", user_only=True):
+    """Soft prior: customer-scoped file ids only (no global fallback)."""
+    ck=_norm_customer_key(customer_key)
+    if not ck:
+        return []
+    rows=example_rows_for_concept(
+        db_path, concept_id, role="positive", user_only=user_only, customer_key=ck
+    )
+    return [int(r["file_id"]) for r in rows if str(r.get("customer_key") or "")==ck]

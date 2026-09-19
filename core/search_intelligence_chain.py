@@ -306,6 +306,7 @@ def apply_search_intelligence_chain(
     index_db: str = "",
     analysis: dict[str, Any] | None = None,
     customer_registry: Any = None,
+    customer: str = "",
     skip_attributes: bool = False,
     skip_object_gate: bool = False,
     skip_discriminative: bool = False,
@@ -334,6 +335,7 @@ def apply_search_intelligence_chain(
     meaning_text = str(analysis.get("search_text") or query_text).strip() or query_text
     attrs = extract_query_attributes(meaning_text)
     layers_run: list[str] = ["query_meaning"]
+    cust = " ".join(str(customer or analysis.get("customer") or "").strip().split())
 
     if not skip_attributes:
         try:
@@ -349,7 +351,7 @@ def apply_search_intelligence_chain(
             from core.concept_evidence import apply_concept_evidence_scoring
 
             results = apply_concept_evidence_scoring(
-                results, meaning_text, index_db=index_db
+                results, meaning_text, index_db=index_db, customer_key=cust
             )
             layers_run.append("concept_evidence")
         except Exception:
@@ -389,7 +391,9 @@ def apply_search_intelligence_chain(
         try:
             from core.color_evidence import apply_color_evidence_scoring
 
-            results = apply_color_evidence_scoring(results, meaning_text)
+            results = apply_color_evidence_scoring(
+                results, meaning_text, customer_key=cust
+            )
             layers_run.append("color_evidence")
         except Exception:
             pass
@@ -405,6 +409,7 @@ def apply_search_intelligence_chain(
             "index_db": bool(index_db),
             "unified": True,
             "double_score_guard": True,
+            "customer": cust,
         }
         results[0].debug = dbg0
     return results
