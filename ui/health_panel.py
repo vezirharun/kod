@@ -121,6 +121,24 @@ class HealthPanel(QWidget):
         ):
             inner.addWidget(w)
 
+        # --- Arşiv Sağlığı (thin projection; counts only) ---
+        ah_grp = QGroupBox("Arşiv Sağlığı")
+        ah_inner = QVBoxLayout(ah_grp)
+        self.lbl_ah_healthy = QLabel("Sağlıklı: —")
+        self.lbl_ah_missing = QLabel("Eksik: —")
+        self.lbl_ah_repair = QLabel("Onarım gerekli: —")
+        self.lbl_ah_broken = QLabel("Bozuk: —")
+        self.lbl_ah_failed = QLabel("Başarısız: —")
+        for w in (
+            self.lbl_ah_healthy,
+            self.lbl_ah_missing,
+            self.lbl_ah_repair,
+            self.lbl_ah_broken,
+            self.lbl_ah_failed,
+        ):
+            ah_inner.addWidget(w)
+        inner.addWidget(ah_grp)
+
         btn_row1 = QHBoxLayout()
         self.btn_verify = QPushButton("İndeksi Doğrula")
         self.btn_verify.clicked.connect(self._on_verify)
@@ -196,6 +214,12 @@ class HealthPanel(QWidget):
         self.lbl_cache.setText(
             f"Cache: {c.get('total', 0)} MB (thumb {c.get('thumbnails', 0)} MB)"
         )
+        # Lightweight archive-health counts when db_path is configured
+        try:
+            if str(getattr(self.settings, "db_path", "") or "").strip():
+                self.refresh_archive_health()
+        except Exception:
+            pass
 
     def set_reconciliation_status(self, stats: dict) -> None:
         physical = stats.get("physical") or {}
@@ -225,6 +249,55 @@ class HealthPanel(QWidget):
             f"AI onarılan {int(stats.get('ai_repaired', 0) or 0)} | "
             f"başarısız {int(stats.get('repair_failed', 0) or 0)}"
         )
+
+    def set_archive_health(self, summary: dict) -> None:
+        """Update Arşiv Sağlığı labels from summarize_archive_health result."""
+        try:
+            from core.archive_health import format_archive_health_labels
+
+            labels = format_archive_health_labels(summary or {})
+        except Exception:
+            labels = {
+                "healthy": "Sağlıklı: —",
+                "missing": "Eksik: —",
+                "repair_needed": "Onarım gerekli: —",
+                "broken": "Bozuk: —",
+                "failed": "Başarısız: —",
+            }
+        self.lbl_ah_healthy.setText(labels.get("healthy", "Sağlıklı: —"))
+        self.lbl_ah_missing.setText(labels.get("missing", "Eksik: —"))
+        self.lbl_ah_repair.setText(labels.get("repair_needed", "Onarım gerekli: —"))
+        self.lbl_ah_broken.setText(labels.get("broken", "Bozuk: —"))
+        self.lbl_ah_failed.setText(labels.get("failed", "Başarısız: —"))
+
+    def refresh_archive_health(self) -> None:
+        """Lightweight counts-only refresh; never blocks on heavy scans."""
+        try:
+            settings = self.settings
+            db_path = str(getattr(settings, "db_path", "") or "").strip()
+            if not db_path:
+                self.set_archive_health({})
+                return
+            from core.archive_health import (
+                open_job_store_for_settings,
+                summarize_archive_health,
+            )
+            from core.db import Database
+
+            try:
+                db = Database(db_path, read_only=True)
+            except TypeError:
+                db = Database(db_path)
+            job_store = open_job_store_for_settings(settings)
+            summary = summarize_archive_health(db, job_store=job_store)
+            self.set_archive_health(summary)
+        except Exception as exc:
+            logger.debug("refresh_archive_health failed: %s", exc)
+            self.lbl_ah_healthy.setText("Sağlıklı: —")
+            self.lbl_ah_missing.setText("Eksik: —")
+            self.lbl_ah_repair.setText("Onarım gerekli: —")
+            self.lbl_ah_broken.setText("Bozuk: —")
+            self.lbl_ah_failed.setText("Başarısız: —")
 
     def _refresh_metrics(self) -> None:
         if self._last_snapshot:
