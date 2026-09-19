@@ -1,0 +1,62 @@
+﻿# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# App data / indexes / caches (keep code only)
+data/
+cache/
+.cache_object_photos/
+mem/
+explorer_preview/
+motif-data/
+reports/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.v3jobs.db
+*.index
+
+# Models / weights
+*.pt
+*.pth
+*.onnx
+*.bin
+weights/
+
+# Archives / dumps
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+
+# IDE / OS
+.vscode/
+.idea/
+.cursor/
+.codex/
+.agents/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Build / temp
+build/
+dist/
+*.log
+_tmp*
+temp/
+__pycache__/

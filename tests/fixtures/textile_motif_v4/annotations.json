@@ -1,0 +1,84 @@
+{
+  "version": 4,
+  "isolated_from_pattern_index": true,
+  "dummy": true,
+  "classes": [
+    "flower",
+    "leaf",
+    "rose",
+    "leopard",
+    "zebra",
+    "snake",
+    "butterfly",
+    "paisley",
+    "geometric"
+  ],
+  "flags": [
+    "small_motif",
+    "large_motif",
+    "multi_motif",
+    "no_motif",
+    "lookalike"
+  ],
+  "images": [
+    {
+      "id": "dummy_flower_leaf",
+      "file": "images/dummy_flower_leaf.png",
+      "width": 64,
+      "height": 64,
+      "split": "unassigned",
+      "flags": ["multi_motif", "large_motif"],
+      "lookalike_classes": [],
+      "instances": [
+        {"class": "flower", "bbox": [4, 4, 28, 28], "small_motif": false},
+        {"class": "leaf", "bbox": [36, 8, 58, 40], "small_motif": false}
+      ]
+    },
+    {
+      "id": "dummy_rose_small",
+      "file": "images/dummy_rose_small.png",
+      "width": 64,
+      "height": 64,
+      "split": "unassigned",
+      "flags": ["small_motif"],
+      "lookalike_classes": [],
+      "instances": [
+        {"class": "rose", "bbox": [40, 40, 48, 48], "small_motif": true}
+      ]
+    },
+    {
+      "id": "dummy_leopard",
+      "file": "images/dummy_leopard.png",
+      "width": 64,
+      "height": 64,
+      "split": "unassigned",
+      "flags": ["large_motif"],
+      "lookalike_classes": [],
+      "instances": [
+        {"class": "leopard", "bbox": [8, 8, 56, 56], "small_motif": false}
+      ]
+    },
+    {
+      "id": "dummy_negative",
+      "file": "images/dummy_negative.png",
+      "width": 64,
+      "height": 64,
+      "split": "unassigned",
+      "flags": ["no_motif"],
+      "lookalike_classes": ["geometric"],
+      "instances": []
+    },
+    {
+      "id": "dummy_lookalike_drawing",
+      "file": "images/dummy_lookalike.png",
+      "width": 64,
+      "height": 64,
+      "split": "unassigned",
+      "flags": ["lookalike"],
+      "lookalike_classes": ["flower"],
+      "instances": [
+        {"class": "flower", "bbox": [12, 12, 32, 32], "small_motif": false}
+      ]
+    }
+  ]
+}

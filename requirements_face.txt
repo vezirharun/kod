@@ -1,0 +1,11 @@
+# Optional Face Intelligence stack (InsightFace / ArcFace buffalo_l).
+# Pattern search runs without this. First FaceAnalysis() may download buffalo_l
+# into the InsightFace model cache (~300MB). Do not stub embeddings if this fails.
+#
+# Windows: insightface 0.7.3 needs MSVC to build. Prefer the pure-Python wheel:
+#   pip install insightface==1.0.1 --no-deps
+#   pip install onnxruntime onnx
+# Do not pip-install opencv-python on top of the project's existing cv2 (file lock).
+insightface>=0.7.3
+onnxruntime>=1.16.0
+numpy>=1.24.0

@@ -1,0 +1,21 @@
+V3 Preview-First / General-AI Fix Validation
+
+Changes:
+- General AI input is strictly Feature Preview; no Thumbnail fallback.
+- Manual FAST/COMPLETE/REPAIR indexing performs a disk reconciliation scan.
+  Existing READY artifacts remain idempotent; only new/changed/missing artifacts are queued.
+- Isolated default test processor now emits deterministic valid DINO/CLIP vectors;
+  production uses RealArtifactProcessor and is unchanged by this test stub.
+- Lifecycle test aligned with the Preview dependency gate.
+
+Validated:
+- test_preview_first_general_ai_contract.py: 3 passed
+- test_preview_to_thumbnail.py: 1 passed
+- test_queue_lifecycle_regression.py: 8 passed
+- test_live_counter_sync.py::test_live_counter_sync_with_index_pipeline: 1 passed
+- compileall: passed
+
+Notes:
+- Full index_v3 suite was not claimed as fully green; some long-running integration tests
+  exceed the available execution window. The targeted contracts above pass.
+- No database is bundled or modified by this ZIP.

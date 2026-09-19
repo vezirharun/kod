@@ -1,0 +1,136 @@
+{
+  "authoring": {
+    "circular": false,
+    "method": "Independent visual intent. Each expected_relation was written from the intended layout of drawn boxes (leaf is above the flower, bag is on the viewer's left of the person, opposite corners are far). Relations were NOT produced by SpatialEngine.search, evaluate_relation, or spatial_engine.relate(gt_boxes).",
+    "boxes": "Manual pixel xyxy on 400x400 drawings. At test time these boxes are planted into a tmp object_index only. Detector boxes are not required for geometry scoring.",
+    "detector": "COCO-80 has no flower/leaf/rose/leopard. Geometry for those pairs is scored from this sidecar. Detector-path queries without those labels must be SPATIAL_EVIDENCE_UNAVAILABLE — never CLIP relations."
+  },
+  "image_size": [400, 400],
+  "cases": [
+    {
+      "id": "flower_leaf_above",
+      "file": "flower_leaf_above.png",
+      "scenario": "flower+leaf",
+      "query": "çiçeğin üstünde yaprak",
+      "expected_relation": "ABOVE",
+      "expect_hit": true,
+      "objects": [
+        {"label": "flower", "bbox": [140, 220, 270, 360], "instance_id": "flower_01"},
+        {"label": "leaf", "bbox": [150, 30, 260, 150], "instance_id": "leaf_01"}
+      ]
+    },
+    {
+      "id": "flower_leaf_near",
+      "file": "flower_leaf_near.png",
+      "scenario": "flower+leaf",
+      "query": "çiçeğin yanında yaprak",
+      "expected_relation": "NEAR",
+      "expect_hit": true,
+      "objects": [
+        {"label": "flower", "bbox": [80, 140, 200, 280], "instance_id": "flower_01"},
+        {"label": "leaf", "bbox": [210, 150, 310, 250], "instance_id": "leaf_01"}
+      ]
+    },
+    {
+      "id": "leopard_flower_near",
+      "file": "leopard_flower_near.png",
+      "scenario": "leopard+flower",
+      "query": "leoparın yanında gül",
+      "expected_relation": "NEAR",
+      "expect_hit": true,
+      "objects": [
+        {"label": "leopard", "bbox": [40, 120, 190, 300], "instance_id": "leopard_01"},
+        {"label": "rose", "bbox": [200, 150, 310, 270], "instance_id": "rose_01"}
+      ]
+    },
+    {
+      "id": "rose_leaf_below",
+      "file": "rose_leaf_below.png",
+      "scenario": "rose+leaf",
+      "query": "gülün altında yaprak",
+      "expected_relation": "BELOW",
+      "expect_hit": true,
+      "objects": [
+        {"label": "rose", "bbox": [140, 30, 270, 160], "instance_id": "rose_01"},
+        {"label": "leaf", "bbox": [150, 230, 260, 360], "instance_id": "leaf_01"}
+      ]
+    },
+    {
+      "id": "person_bag_left",
+      "file": "person_bag_left.png",
+      "scenario": "object+object",
+      "query": "insanın solunda çanta",
+      "expected_relation": "LEFT_OF",
+      "expect_hit": true,
+      "objects": [
+        {"label": "person", "bbox": [220, 80, 340, 340], "instance_id": "person_01"},
+        {"label": "handbag", "bbox": [30, 160, 130, 280], "instance_id": "bag_01"}
+      ]
+    },
+    {
+      "id": "person_bag_right",
+      "file": "person_bag_right.png",
+      "scenario": "object+object",
+      "query": "insanın sağında çanta",
+      "expected_relation": "RIGHT_OF",
+      "expect_hit": true,
+      "objects": [
+        {"label": "person", "bbox": [50, 80, 170, 340], "instance_id": "person_01"},
+        {"label": "handbag", "bbox": [270, 160, 370, 280], "instance_id": "bag_01"}
+      ]
+    },
+    {
+      "id": "person_bag_near",
+      "file": "person_bag_near.png",
+      "scenario": "object+object",
+      "query": "insanın yanında çanta",
+      "expected_relation": "NEAR",
+      "expect_hit": true,
+      "objects": [
+        {"label": "person", "bbox": [90, 70, 210, 330], "instance_id": "person_01"},
+        {"label": "handbag", "bbox": [215, 180, 300, 280], "instance_id": "bag_01"}
+      ]
+    },
+    {
+      "id": "person_bag_yakininda",
+      "file": "person_bag_yakininda.png",
+      "scenario": "yanında/yakınında",
+      "query": "insanın yakınında çanta",
+      "expected_relation": "NEAR",
+      "expect_hit": true,
+      "objects": [
+        {"label": "person", "bbox": [100, 80, 220, 320], "instance_id": "person_01"},
+        {"label": "handbag", "bbox": [225, 170, 310, 270], "instance_id": "bag_01"}
+      ]
+    },
+    {
+      "id": "person_bag_far_not_near",
+      "file": "person_bag_far.png",
+      "scenario": "object+object",
+      "query": "insanın yanında çanta",
+      "expected_relation": "NEAR",
+      "expect_hit": false,
+      "independent_label": "FAR",
+      "negative_reason": "far pair must not be NEAR",
+      "objects": [
+        {"label": "person", "bbox": [8, 8, 90, 140], "instance_id": "person_01"},
+        {"label": "handbag", "bbox": [300, 290, 392, 392], "instance_id": "bag_01"}
+      ]
+    },
+    {
+      "id": "two_flowers_leaf_above_second",
+      "file": "two_flowers_leaf_above_second.png",
+      "scenario": "multiple_same_class",
+      "query": "çiçeğin üstünde yaprak",
+      "expected_relation": "ABOVE",
+      "expect_hit": true,
+      "expected_anchor_instance": "flower_02",
+      "expected_located_instance": "leaf_01",
+      "objects": [
+        {"label": "flower", "bbox": [10, 30, 90, 140], "instance_id": "flower_01"},
+        {"label": "flower", "bbox": [200, 220, 330, 360], "instance_id": "flower_02"},
+        {"label": "leaf", "bbox": [210, 25, 320, 150], "instance_id": "leaf_01"}
+      ]
+    }
+  ]
+}

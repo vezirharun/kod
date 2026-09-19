@@ -1,0 +1,206 @@
+"""
+Face Index V4
+Scalable identity retrieval:
+- no fixed top-100 person gate
+- searches face observations/prototypes directly
+- groups evidence by person
+- explicit gender filter only
+- identity score remains separate from pattern score
+- optional FAISS if installed, with exact fallback
+- conservative identity thresholds
+"""
+from __future__ import annotations
+import os, json, sqlite3, math
+from dataclasses import dataclass, field
+from typing import Optional, Iterable
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import faiss
+except Exception:
+    faiss = None
+
+@dataclass
+class FaceMatch:
+    person_id: str
+    face_id: Optional[str]
+    similarity: float
+    identity_score: float
+    category: str
+    gender: str="UNKNOWN"
+    name: Optional[str]=None
+    quality: float=1.0
+    evidence_count: int=1
+    margin: float=0.0
+    metadata: dict=field(default_factory=dict)
+
+def _cos(a,b):
+    if not a or not b or len(a)!=len(b): return 0.0
+    aa=sum(x*x for x in a); bb=sum(x*x for x in b)
+    if aa<=0 or bb<=0: return 0.0
+    return max(-1.0,min(1.0,sum(x*y for x,y in zip(a,b))/(aa**0.5*bb**0.5)))
+
+def _sim(a,b):
+    return (_cos(a,b)+1.0)/2.0
+
+class FaceIndexV4:
+    def __init__(self, db_path=None, ann_path=None):
+        self.db_path=db_path
+        self.ann_path=ann_path
+        self._rows_cache=None
+        self._faiss=None
+        self._faiss_rows=[]
+        self._load_ann()
+
+    def _load_ann(self):
+        if faiss is None or not self.ann_path or not os.path.exists(self.ann_path):
+            return
+        try:
+            self._faiss=faiss.read_index(self.ann_path)
+            meta=self.ann_path+".json"
+            if os.path.exists(meta):
+                self._faiss_rows=json.load(open(meta,encoding="utf-8"))
+        except Exception:
+            self._faiss=None
+            self._faiss_rows=[]
+
+    def _rows(self):
+        if self._rows_cache is not None: return self._rows_cache
+        rows=[]
+        if not self.db_path or not os.path.exists(self.db_path):
+            self._rows_cache=rows; return rows
+        con=sqlite3.connect(self.db_path)
+        try:
+            tables={r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            table="face_embeddings" if "face_embeddings" in tables else None
+            if not table:
+                self._rows_cache=rows; return rows
+            cols={r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+            wanted=["person_id","face_id","embedding","gender","name","quality"]
+            actual=[c for c in wanted if c in cols]
+            if "embedding" not in actual:
+                self._rows_cache=rows; return rows
+            for row in con.execute("SELECT "+",".join(actual)+f" FROM {table}"):
+                d=dict(zip(actual,row))
+                emb=d.get("embedding")
+                if isinstance(emb,(bytes,bytearray)):
+                    try: emb=json.loads(emb.decode())
+                    except Exception: emb=None
+                elif isinstance(emb,str):
+                    try: emb=json.loads(emb)
+                    except Exception: emb=None
+                if isinstance(emb,list) and emb:
+                    d["embedding"]=emb
+                    rows.append(d)
+        finally:
+            con.close()
+        self._rows_cache=rows
+        return rows
+
+    def _candidate_observations(self, q, ann_k=2000):
+        rows=self._rows()
+        # Preferred path: independent face FAISS over observations.
+        if self._faiss is not None and np is not None and self._faiss_rows:
+            try:
+                x=np.asarray([q],dtype="float32")
+                faiss.normalize_L2(x)
+                k=min(max(50,ann_k),self._faiss.ntotal)
+                D,I=self._faiss.search(x,k)
+                out=[]
+                for score,idx in zip(D[0],I[0]):
+                    if idx<0 or idx>=len(self._faiss_rows): continue
+                    r=dict(self._faiss_rows[idx])
+                    r["_ann_similarity"]=float((score+1)/2)
+                    out.append(r)
+                return out
+            except Exception:
+                pass
+        # Exact fallback: no arbitrary person gate. All observations are eligible.
+        return rows
+
+    @staticmethod
+    def category(sim, margin):
+        if sim>=0.84 and margin>=0.035: return "SAME_PERSON"
+        if sim>=0.74 and margin>=0.020: return "PROBABLE_SAME_PERSON"
+        if sim>=0.58: return "SIMILAR_FACE"
+        return "OTHER_FACE"
+
+    def search(self, query_embedding, gender_filter=None, ann_k=2000):
+        rows=self._candidate_observations(query_embedding,ann_k)
+        scored=[]
+        gf=(gender_filter or "").upper()
+        for r in rows:
+            g=(r.get("gender") or "UNKNOWN").upper()
+            # Gender is a filter only when explicitly requested.
+            if gf and gf not in ("ALL","ANY") and g!=gf: continue
+            sim=r.get("_ann_similarity")
+            if sim is None: sim=_sim(query_embedding,r["embedding"])
+            q=float(r.get("quality") or 1.0)
+            q=max(0.0,min(1.0,q))
+            rank=sim*0.90+q*0.10
+            scored.append((rank,sim,r))
+        scored.sort(key=lambda x:x[0],reverse=True)
+
+        # Group observations by person before deciding identity category.
+        groups={}
+        for rank,sim,r in scored:
+            pid=str(r.get("person_id") or "UNKNOWN")
+            g=groups.setdefault(pid,{
+                "person_id":pid,
+                "name":r.get("name"),
+                "gender":(r.get("gender") or "UNKNOWN").upper(),
+                "best_similarity":0.0,
+                "best_rank":0.0,
+                "evidence_count":0,
+                "face_ids":[],
+                "qualities":[],
+                "observations":[]
+            })
+            g["best_similarity"]=max(g["best_similarity"],sim)
+            g["best_rank"]=max(g["best_rank"],rank)
+            g["evidence_count"]+=1
+            if r.get("face_id") is not None: g["face_ids"].append(str(r["face_id"]))
+            g["qualities"].append(q)
+            g["observations"].append(r)
+            if not g["name"] and r.get("name"): g["name"]=r.get("name")
+
+        persons=list(groups.values())
+        persons.sort(key=lambda x:(x["best_rank"],x["best_similarity"]),reverse=True)
+
+        # Margin is between person identities, not arbitrary individual rows.
+        for i,g in enumerate(persons):
+            nxt=persons[i+1]["best_similarity"] if i+1<len(persons) else 0.0
+            margin=g["best_similarity"]-nxt
+            cat=self.category(g["best_similarity"],margin)
+            # Multiple independent observations increase confidence modestly,
+            # never enough to manufacture identity from weak similarity.
+            corroboration=min(0.06, max(0,g["evidence_count"]-1)*0.01)
+            identity_score=min(1.0,g["best_similarity"]+corroboration)
+            g["margin"]=margin
+            g["category"]=cat
+            g["identity_score"]=identity_score
+            g["quality"]=sum(g["qualities"])/len(g["qualities"]) if g["qualities"] else 1.0
+
+        return persons
+
+    def build_ann(self, output_path):
+        """Build a separate face ANN from ALL observations. Never touches Pattern FAISS."""
+        if faiss is None or np is None:
+            return {"built":False,"reason":"faiss_or_numpy_missing"}
+        rows=self._rows()
+        if not rows: return {"built":False,"reason":"no_face_embeddings"}
+        mat=np.asarray([r["embedding"] for r in rows],dtype="float32")
+        faiss.normalize_L2(mat)
+        index=faiss.IndexFlatIP(mat.shape[1])
+        index.add(mat)
+        faiss.write_index(index,output_path)
+        with open(output_path+".json","w",encoding="utf-8") as f:
+            json.dump([{k:v for k,v in r.items() if k!="embedding"} for r in rows],f,ensure_ascii=False)
+        self._faiss=index
+        self._faiss_rows=[{k:v for k,v in r.items() if k!="embedding"} for r in rows]
+        return {"built":True,"count":len(rows),"dimension":mat.shape[1]}
