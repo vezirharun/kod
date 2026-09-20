@@ -69,6 +69,19 @@ def build_text_search_blob(
                 color_terms + [str(x) for x in texture_map.get("dominant_palette") or []]
             )
         )
+    # Teach → text-search wire: fall back path/aliases from texture_map;
+    # include slash-split segments so tokens match even when "/" blocks tokenize.
+    from core.teach_search_wire import (
+        category_tokens_for_blob,
+        resolve_category_blob_fields,
+    )
+
+    cat_path, cat_aliases = resolve_category_blob_fields(
+        texture_map,
+        category_path=category_path,
+        category_aliases=category_aliases,
+    )
+    cat_token_parts = category_tokens_for_blob(cat_path, cat_aliases)
     parts = [
         filename,
         Path(path).parent.name if path else "",
@@ -85,8 +98,9 @@ def build_text_search_blob(
         prof.texture_family,
         prof.color_family,
         group_label,
-        category_path,
-        " ".join(category_aliases or []),
+        cat_path,
+        " ".join(cat_aliases),
+        " ".join(cat_token_parts),
         " ".join(feedback_labels or []),
         " ".join(semantic_terms),
         " ".join(dna_terms),

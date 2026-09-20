@@ -194,6 +194,9 @@ def apply_manual_category(
             texture_map=tm,
             pattern_family=pattern_family,
             pattern_subtype=pattern_subtype,
+            pattern_type=animal_print_type or pattern_subtype,
+            category_path=path,
+            category_aliases=aliases,
             feedback_labels=aliases,
             semantic_enabled=bool(
                 getattr(settings, "semantic_text_search_enabled", False)

@@ -3707,6 +3707,17 @@ class SearchEngine:
                     breakdown["zero_shot_visual"] = zs_clip
             seen.add(fid)
             result = self._to_result(rec, score, breakdown)
+            _mcp = str(rec.get("manual_category_path") or "").strip()
+            _cp = str(rec.get("category_path") or "").strip()
+            if not _mcp or not _cp:
+                _tm = rec.get("texture_map") or {}
+                if isinstance(_tm, dict):
+                    _mcp = _mcp or str(_tm.get("manual_category_path") or "").strip()
+                    _cp = _cp or str(_tm.get("category_path") or "").strip()
+            if _mcp:
+                result.debug["manual_category_path"] = _mcp
+            if _cp:
+                result.debug["category_path"] = _cp
             if rec.get("_learned_concept_exact") or rec.get("_learned_concept_clip"):
                 result.debug["learned_concept"] = True
                 result.debug["learned_concept_exact"] = bool(rec.get("_learned_concept_exact"))
@@ -4048,12 +4059,29 @@ class SearchEngine:
                         cmap = concept_scores.get(int(r.file_id), {}) or {}
                         human_score = float(cmap.get(human_node, 0.0) or 0.0)
                     if gender_only_intent and not face_match:
-                        # Do not re-copy OpenCLIP/concept scores onto gender
-                        # after UVI already refused generic CLIP as evidence.
-                        dbg.pop("gender_visual_score", None)
-                        dbg["human_semantic_score"] = 0.0
-                        r.debug = dbg
-                        continue
+                        # Keep taught / manual-category evidence; do not demote.
+                        try:
+                            from core.teach_search_wire import (
+                                keep_taught_evidence_on_gender,
+                            )
+
+                            _qtoks = [
+                                t
+                                for t in str(effective_text or text or "").split()
+                                if t.strip()
+                            ]
+                            _keep_taught = keep_taught_evidence_on_gender(
+                                dbg, _qtoks
+                            )
+                        except Exception:
+                            _keep_taught = False
+                        if not _keep_taught:
+                            # Do not re-copy OpenCLIP/concept scores onto gender
+                            # after UVI already refused generic CLIP as evidence.
+                            dbg.pop("gender_visual_score", None)
+                            dbg["human_semantic_score"] = 0.0
+                            r.debug = dbg
+                            continue
                     if face_match or human_score >= 0.18:
                         dbg["human_semantic_mode"] = True
                         dbg["human_semantic_only"] = True

@@ -786,6 +786,30 @@ def _write_file_classification(db, file_id: int, overlay: dict[str, Any]) -> Non
     if tags is not None:
         tm["user_tags"] = [str(t).strip() for t in tags if str(t).strip()]
     db.upsert_texture_map(file_id, tm)
+    blob = ""
+    cat_for_blob = path or str(tm.get("manual_category_path") or tm.get("category_path") or "")
+    if cat_for_blob:
+        try:
+            from core.text_index import build_text_search_blob
+
+            rec = _lite_file_row(db, file_id)
+            alias_raw = tm.get("category_aliases") or []
+            aliases = (
+                [str(x).strip() for x in alias_raw if str(x).strip()]
+                if isinstance(alias_raw, list)
+                else ([str(alias_raw).strip()] if alias_raw else [])
+            )
+            blob = build_text_search_blob(
+                filename=str(rec.get("filename") or ""),
+                path=str(rec.get("path") or ""),
+                texture_map=tm,
+                category_path=cat_for_blob,
+                category_aliases=aliases,
+                pattern_family=family,
+                pattern_type=animal,
+            )
+        except Exception:
+            blob = ""
     try:
         db.update_file_category(
             file_id,
@@ -795,6 +819,7 @@ def _write_file_classification(db, file_id: int, overlay: dict[str, Any]) -> Non
             category_source="manual_user",
             pattern_family=family,
             pattern_type=animal,
+            text_search_blob=blob,
         )
     except Exception:
         pass

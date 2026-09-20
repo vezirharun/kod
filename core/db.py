@@ -2350,6 +2350,21 @@ class Database:
             out.append(d)
         return out
 
+    def _category_path_label_search(
+        self, terms: list[str], limit: int
+    ) -> dict[int, dict[str, Any]]:
+        """Taught category_path / manual_category_path term match (generic)."""
+        from core.teach_search_wire import run_category_path_label_search
+
+        if not terms:
+            return {}
+        cap = int(limit) if int(limit or 0) > 0 else 800
+        try:
+            with self.connect() as conn:
+                return run_category_path_label_search(conn, terms, cap)
+        except Exception:
+            return {}
+
     def _label_text_search(
         self, terms: list[str], limit: int
     ) -> dict[int, dict[str, Any]]:
@@ -2375,6 +2390,8 @@ class Database:
                 ).strip()
                 if subtype:
                     subtypes.add(subtype)
+        # Always merge taught category-path hits (in addition to family/custom_tag).
+        hits.update(self._category_path_label_search(terms, cap))
         if not families and not animals and not subtypes:
             hits.update(self._custom_tag_label_search(terms, cap))
             return hits
