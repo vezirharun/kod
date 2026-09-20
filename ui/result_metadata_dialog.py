@@ -37,6 +37,14 @@ from core.category_memory import (
     register_root_category,
 )
 from core.category_tree import pattern_fields_for_path
+from core.category_selection_sync import (
+    canonical_path_from_parts,
+    merge_tags_preserve_manual,
+    path_segment_tags,
+    resolve_parts_against_options,
+    split_category_selection,
+    sync_selection_state,
+)
 from core.textile_terms import FAMILY_UI_CHOICES, normalize_turkish
 from ui.designer_labels import COLOR_LABELS_TR, brand_badge_text, color_badge_text
 
@@ -468,6 +476,7 @@ class ResultMetadataDialog(QDialog):
         self._options_loaded = False
         self._options_worker: _OptionsWorker | None = None
         self._options_req_id = 0
+        self._syncing_category = False
         self._build_ui()
         self._prefill()
         apply_responsive_dialog(self, min_width=440, prefer_width=480)
@@ -507,8 +516,10 @@ class ResultMetadataDialog(QDialog):
         self.cmb_family = TypeaheadCombo()
         self.cmb_color = TypeaheadCombo()
         self.cmb_brand = TypeaheadCombo()
-        self.cmb_parent.currentIndexChanged.connect(self._reload_children)
-        self.cmb_parent.lineEdit().editingFinished.connect(self._reload_children)
+        self.cmb_parent.currentIndexChanged.connect(self._on_parent_changed)
+        self.cmb_parent.lineEdit().editingFinished.connect(self._on_parent_changed)
+        self.cmb_child.currentIndexChanged.connect(self._on_child_changed)
+        self.cmb_child.lineEdit().editingFinished.connect(self._on_child_changed)
 
         self.lbl_new_parent = QLabel("")
         self.lbl_new_child = QLabel("")
@@ -783,7 +794,96 @@ class ResultMetadataDialog(QDialog):
                 self.cmb_color.set_text(kept["color"])
         if kept["brand"]:
             self.cmb_brand.set_text(kept["brand"])
+        # Merge path-segment tags once options are ready (merge only).
+        self._apply_category_selection_sync(source="parent")
         self.lbl_options_status.setVisible(False)
+
+    def _on_parent_changed(self, *_args) -> None:
+        """Parent combo changed: sync path-qualified selection, then reload children."""
+        if self._syncing_category:
+            return
+        self._apply_category_selection_sync(source="parent")
+
+    def _on_child_changed(self, *_args) -> None:
+        """Child combo changed: merge path segment tags only (do not wipe)."""
+        if self._syncing_category:
+            return
+        self._apply_category_selection_sync(source="child")
+
+    def _apply_category_selection_sync(self, source: str = "parent") -> None:
+        """Split path-qualified Ana text into Ana/Alt; merge path tags. Re-entrancy safe."""
+        if self._syncing_category:
+            return
+        self._syncing_category = True
+        try:
+            parent_text = self.cmb_parent.current_text()
+            child_text = self.cmb_child.current_text()
+            opts = self._options or {}
+            parents = list(opts.get("parents") or [])
+            by_parent = opts.get("children_by_parent") or {}
+
+            if source == "child":
+                # Child-only: merge path segment tags; do not wipe or re-split parent.
+                if "/" in parent_text:
+                    parent, child = split_category_selection(parent_text)
+                    if not child:
+                        child = child_text
+                else:
+                    parent, child = parent_text, child_text
+                parent, child = resolve_parts_against_options(
+                    parent, child, parents=parents, children_by_parent=by_parent
+                )
+                self._tags = merge_tags_preserve_manual(
+                    self._tags, path_segment_tags(parent, child)
+                )
+                self._refresh_tags()
+                return
+
+            # source == parent: path-qualified or catalog display → split into Ana/Alt.
+            looks_path = "/" in parent_text
+            catalog_hit = False
+            if not looks_path and parent_text:
+                try:
+                    catalog = getattr(self.cmb_parent, "_semantic_catalog", None) or []
+                    pt = parent_text.strip()
+                    for cand in catalog:
+                        disp = str(getattr(cand, "display", "") or "").strip()
+                        if disp and disp.casefold() == pt.casefold() and "/" in disp:
+                            parent_text = disp
+                            looks_path = True
+                            catalog_hit = True
+                            break
+                except Exception:
+                    pass
+
+            state = sync_selection_state(
+                parent_text,
+                existing_tags=self._tags,
+                parents=parents,
+                children_by_parent=by_parent,
+                child_text=None if looks_path else child_text,
+            )
+            new_parent = state["parent"]
+            new_child = state["child"]
+
+            self.cmb_parent.blockSignals(True)
+            self.cmb_child.blockSignals(True)
+            try:
+                if new_parent != self.cmb_parent.current_text() or looks_path or catalog_hit:
+                    self.cmb_parent.set_text(new_parent)
+                self._reload_children()
+                if new_child:
+                    self.cmb_child.set_text(new_child)
+                elif looks_path:
+                    self.cmb_child.set_text("")
+            finally:
+                self.cmb_parent.blockSignals(False)
+                self.cmb_child.blockSignals(False)
+
+            self._tags = list(state["tags"])
+            self._refresh_tags()
+        finally:
+            self._syncing_category = False
 
     def _reload_children(self) -> None:
         parent = self.cmb_parent.current_text()
@@ -882,9 +982,28 @@ class ResultMetadataDialog(QDialog):
         invalidate_edit_options_cache(db)
 
     def values(self) -> dict:
-        parent = self.cmb_parent.current_text()
-        child = self.cmb_child.current_text()
-        path = f"{parent}/{child}".rstrip("/") if parent else ""
+        parent_raw = self.cmb_parent.current_text()
+        child_raw = self.cmb_child.current_text()
+        opts = self._options or {}
+        if "/" in parent_raw:
+            parent, child = split_category_selection(parent_raw)
+            # If child combo also has a value and parent split already has child,
+            # prefer the split (path-qualified parent is authoritative).
+            if not child and child_raw:
+                child = child_raw
+        else:
+            parent, child = parent_raw, child_raw
+        parent, child = resolve_parts_against_options(
+            parent,
+            child,
+            parents=list(opts.get("parents") or []),
+            children_by_parent=opts.get("children_by_parent") or {},
+        )
+        path = canonical_path_from_parts(parent, child)
+        # Ensure tags include path segments (merge only — never wipe manual).
+        self._tags = merge_tags_preserve_manual(
+            self._tags, path_segment_tags(parent, child)
+        )
         fields = pattern_fields_for_path(path) if path else {}
         family = self.cmb_family.current_data_or_text()
         if not family:
