@@ -158,17 +158,50 @@ class Thumbnailer:
         ext = Path(source).suffix.lower()
         out_path = self.thumbnail_path_for(source)
         if out_path.exists() and out_path.stat().st_size > 0:
-            try:
-                with Image.open(out_path) as img:
-                    w, h = img.size
-                return ThumbnailResult(
-                    success=True,
-                    thumbnail_path=str(out_path),
-                    width=w,
-                    height=h,
-                )
-            except Exception:
-                pass
+            eps_ai = ext in {".eps", ".ai"}
+            if eps_ai:
+                # Do not HIT on tiny/white EPS stubs — unlink and fall through.
+                usable = False
+                try:
+                    from core.thumb_resolve import is_eps_ai_thumb_usable
+
+                    usable = is_eps_ai_thumb_usable(out_path)
+                except Exception:
+                    try:
+                        from core.preview_renderer import _eps_ai_preview_gate
+
+                        usable, _ = _eps_ai_preview_gate(out_path)
+                    except Exception:
+                        usable = out_path.stat().st_size >= 512
+                if not usable:
+                    try:
+                        out_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        with Image.open(out_path) as img:
+                            w, h = img.size
+                        return ThumbnailResult(
+                            success=True,
+                            thumbnail_path=str(out_path),
+                            width=w,
+                            height=h,
+                        )
+                    except Exception:
+                        pass
+            else:
+                try:
+                    with Image.open(out_path) as img:
+                        w, h = img.size
+                    return ThumbnailResult(
+                        success=True,
+                        thumbnail_path=str(out_path),
+                        width=w,
+                        height=h,
+                    )
+                except Exception:
+                    pass
 
         from core.index_freeze import guard_index_write
 
@@ -270,12 +303,50 @@ class Thumbnailer:
         if not Path(preview).is_file() or Path(preview).stat().st_size <= 0:
             return ThumbnailResult(success=False, error="preview_missing")
         if out_path.is_file() and out_path.stat().st_size > 0:
-            try:
-                with Image.open(out_path) as img:
-                    w, h = img.size
-                return ThumbnailResult(success=True, thumbnail_path=str(out_path), width=w, height=h)
-            except Exception:
-                pass
+            eps_ai = Path(source).suffix.lower() in {".eps", ".ai"}
+            if eps_ai:
+                usable = False
+                try:
+                    from core.thumb_resolve import is_eps_ai_thumb_usable
+
+                    usable = is_eps_ai_thumb_usable(out_path)
+                except Exception:
+                    try:
+                        from core.preview_renderer import _eps_ai_preview_gate
+
+                        usable, _ = _eps_ai_preview_gate(out_path)
+                    except Exception:
+                        usable = out_path.stat().st_size >= 512
+                if not usable:
+                    # Invalid tiny/white — overwrite from preview instead of HIT.
+                    try:
+                        out_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        with Image.open(out_path) as img:
+                            w, h = img.size
+                        return ThumbnailResult(
+                            success=True,
+                            thumbnail_path=str(out_path),
+                            width=w,
+                            height=h,
+                        )
+                    except Exception:
+                        pass
+            else:
+                try:
+                    with Image.open(out_path) as img:
+                        w, h = img.size
+                    return ThumbnailResult(
+                        success=True,
+                        thumbnail_path=str(out_path),
+                        width=w,
+                        height=h,
+                    )
+                except Exception:
+                    pass
         from core.index_freeze import guard_index_write
 
         guard_index_write("thumbnail.create", "core.thumbnailer")

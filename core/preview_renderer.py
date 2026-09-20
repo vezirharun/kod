@@ -232,20 +232,20 @@ def resolve_display_image_path(source_path: str, cache_dir: str = "") -> RenderR
         cache = cache_dir or settings.cache_dir
         thumb = Thumbnailer(cache, settings.thumbnail_max_edge, settings.thumbnail_format)
         tpath = thumb.thumbnail_path_for(source)
-        if tpath.is_file() and tpath.stat().st_size > 0:
-            return RenderResult(success=True, image_path=str(tpath), renderer="thumb_cache")
 
         from core.preview_cache import FeaturePreviewCache
         from core.thumb_resolve import lookup_valid_preview
 
-        # Valid Preview Pool before any source re-open / re-render
-        pool = lookup_valid_preview(source, cache)
-        if pool:
-            return RenderResult(success=True, image_path=pool, renderer="feature_cache")
-
         fp = FeaturePreviewCache(cache, settings.feature_preview_max_edge)
-        # EPS/AI: must pass blank gate (get_existing); other formats keep size>0 hit.
+
         if ext in {".eps", ".ai"}:
+            # EPS/AI: do NOT early-return thumb on size>0 alone.
+            # Order: valid Preview Pool / get_existing FIRST, then gated thumb.
+            pool = lookup_valid_preview(source, cache)
+            if pool:
+                return RenderResult(
+                    success=True, image_path=pool, renderer="feature_cache"
+                )
             ge = fp.get_existing(source)
             if ge.success and ge.preview_path:
                 return RenderResult(
@@ -253,7 +253,27 @@ def resolve_display_image_path(source_path: str, cache_dir: str = "") -> RenderR
                     image_path=ge.preview_path,
                     renderer="feature_cache",
                 )
+            if tpath.is_file() and tpath.stat().st_size > 0:
+                vok, _vreason = _eps_ai_preview_gate(tpath)
+                if vok:
+                    return RenderResult(
+                        success=True, image_path=str(tpath), renderer="thumb_cache"
+                    )
+                _unlink_bad_preview(tpath)
         else:
+            # Other formats: thumb first OK
+            if tpath.is_file() and tpath.stat().st_size > 0:
+                return RenderResult(
+                    success=True, image_path=str(tpath), renderer="thumb_cache"
+                )
+
+            # Valid Preview Pool before any source re-open / re-render
+            pool = lookup_valid_preview(source, cache)
+            if pool:
+                return RenderResult(
+                    success=True, image_path=pool, renderer="feature_cache"
+                )
+
             fpath = fp.preview_path_for(source)
             if fpath.is_file() and fpath.stat().st_size > 0:
                 return RenderResult(
@@ -267,8 +287,17 @@ def resolve_display_image_path(source_path: str, cache_dir: str = "") -> RenderR
         if rec:
             for key in ("thumbnail_path", "feature_preview_path"):
                 p = str(rec.get(key) or "").strip()
-                if p and Path(p).is_file() and Path(p).stat().st_size > 0:
-                    return RenderResult(success=True, image_path=p, renderer=f"db_{key}")
+                if not p:
+                    continue
+                pp = Path(p)
+                if not (pp.is_file() and pp.stat().st_size > 0):
+                    continue
+                if ext in {".eps", ".ai"} and key == "thumbnail_path":
+                    vok, _vreason = _eps_ai_preview_gate(pp)
+                    if not vok:
+                        _unlink_bad_preview(pp)
+                        continue
+                return RenderResult(success=True, image_path=p, renderer=f"db_{key}")
     except Exception as exc:
         logger.debug("display cache lookup failed: %s", exc)
         cache = cache_dir or str(Path(__file__).resolve().parents[1] / "cache")
