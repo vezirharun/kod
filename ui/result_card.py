@@ -25,7 +25,6 @@ from ui.designer_labels import (
     color_badge_text,
     family_badge_for_result,
     independent_feature_badge,
-    reason_chips,
     similarity_tier_label,
     stage_label,
 )
@@ -257,24 +256,6 @@ class ResultCard(QFrame):
         meta.addWidget(self.conf_lbl)
         meta.addStretch()
         info.addLayout(meta)
-
-        # Icon reasons (designer-friendly)
-        if self.view_mode != VIEW_COMPACT:
-            chips_row = QHBoxLayout()
-            chips_row.setSpacing(6)
-            reasons = self.result.match_explanations or []
-            if not reasons and self.result.cluster_reason:
-                reasons = [self.result.cluster_reason]
-            for icon, text in reason_chips(reasons, limit=3):
-                chip = QLabel(f"{icon} {text}")
-                chip.setStyleSheet(
-                    "color:#a3e635;font-size:10px;background:#14532d33;"
-                    "padding:2px 6px;border-radius:3px;"
-                )
-                chip.setToolTip(text)
-                chips_row.addWidget(chip)
-            chips_row.addStretch()
-            info.addLayout(chips_row)
 
         # Keep attrs for update_result compatibility (hidden technical)
         self.engine_lbl = QLabel("")

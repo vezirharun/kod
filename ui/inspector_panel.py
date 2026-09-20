@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.category_predictions import category_predictions_from_result, prediction_label
-from core.pattern_explanation import build_result_explanation, format_explanation_text
+from core.pattern_explanation import build_result_explanation
+from core.search_explanation_ui import format_why_html, format_why_lines
 from core.search_engine import SearchResult
 from core.utils import format_file_size
 
@@ -203,11 +204,21 @@ class InspectorPanel(QWidget):
         dna_l.addWidget(self.lbl_pattern_dna)
         prev_l.addWidget(self.grp_pattern_dna)
 
-        self.grp_ai_explanation = QGroupBox("Neden bu sonuç?")
+        self.grp_ai_explanation = QGroupBox("Neden bu sonuç ▸")
+        self.grp_ai_explanation.setObjectName("grp_ai_explanation")
+        self.grp_ai_explanation.setCheckable(True)
+        self.grp_ai_explanation.setChecked(False)  # start COLLAPSED
+        self.grp_ai_explanation.setFlat(False)
         expl_l = QVBoxLayout(self.grp_ai_explanation)
-        self.lbl_ai_explanation = QLabel("—")
+        self.lbl_ai_explanation = QLabel("")
         self.lbl_ai_explanation.setWordWrap(True)
+        self.lbl_ai_explanation.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         expl_l.addWidget(self.lbl_ai_explanation)
+        self._why_base_title = "Neden bu sonuç"
+        self.grp_ai_explanation.toggled.connect(self._on_why_toggled)
+        self._sync_why_group_title()
         prev_l.addWidget(self.grp_ai_explanation)
 
         self.grp_relations = QGroupBox("BU DESENİN DİĞERLERİ")
@@ -292,9 +303,8 @@ class InspectorPanel(QWidget):
         # Designer view: hide technical DNA / keep "why" + learn
         self.grp_pattern_dna.setVisible(not simple)
         self.grp_ai_prediction.setTitle("Desen tahmini" if simple else "AI Tahmini")
-        self.grp_ai_explanation.setTitle(
-            "Neden benzer?" if simple else "Neden bu sonuç?"
-        )
+        self._why_base_title = "Neden benzer" if simple else "Neden bu sonuç"
+        self._sync_why_group_title()
         for i in range(1, self.tabs.count()):
             self.tabs.setTabVisible(i, not simple)
 
@@ -326,6 +336,10 @@ class InspectorPanel(QWidget):
         self.lbl_preview_src.setText("")
         self.lbl_ai_prediction.setText("Kararsız")
         self._predictions = []
+        self.lbl_ai_explanation.setText("")
+        self.grp_ai_explanation.hide()
+        self.grp_ai_explanation.setChecked(False)
+        self._sync_why_group_title()
         self._set_tab_text(self._tab_scores, "Sonuç seçin…")
         for lbl in (
             self.lbl_pattern_family,
@@ -719,16 +733,28 @@ class InspectorPanel(QWidget):
             natural_why = "<br><br><b>Neden aynı aile?</b><br>" + "<br>".join(
                 f"• {line}" for line in family_explanations
             )
-        self.lbl_ai_explanation.setText(
-            self._append_technical_why(
-                self._build_similarity_explanation_html(
-                    result, d, dna_check_text, why_checks, natural_why, explanation
-                ),
-                dna_check_text,
-                why_checks,
-                natural_why,
+        # Neden box: real-evidence-only helper (no fabricated similarity text).
+        why_lines = format_why_lines(result)
+        why_html = format_why_html(result)
+        if why_lines:
+            self.lbl_ai_explanation.setText(
+                self._append_technical_why(
+                    why_html, dna_check_text, why_checks, natural_why
+                )
             )
-        )
+            # Keep collapsed by default; content is below preview (no overlay).
+            if not self.grp_ai_explanation.isChecked():
+                self.grp_ai_explanation.setChecked(False)
+            self.grp_ai_explanation.show()
+            self.lbl_ai_explanation.setVisible(self.grp_ai_explanation.isChecked())
+            self._sync_why_group_title()
+        else:
+            self.lbl_ai_explanation.setText("")
+            # Hide when empty; keep collapsed for next selection with evidence.
+            self.grp_ai_explanation.hide()
+            self.grp_ai_explanation.setChecked(False)
+            self._sync_why_group_title()
+
         tb = result.text_score_breakdown or {}
         pattern_family = result.pattern_family or d.get("pattern_family") or "unknown"
         contrib = d.get("contribution_scores") or {}
@@ -903,6 +929,20 @@ class InspectorPanel(QWidget):
         if lbl:
             lbl.setText(html)
 
+    def _why_title_base(self) -> str:
+        return getattr(self, "_why_base_title", None) or "Neden bu sonuç"
+
+    def _sync_why_group_title(self) -> None:
+        base = self._why_title_base()
+        open_ = bool(self.grp_ai_explanation.isChecked())
+        mark = "▾" if open_ else "▸"
+        self.grp_ai_explanation.setTitle(f"{base} {mark}")
+
+    def _on_why_toggled(self, checked: bool) -> None:
+        self._sync_why_group_title()
+        # Content sits in the group layout below preview — never overlay.
+        self.lbl_ai_explanation.setVisible(bool(checked))
+
     def _emit_folder(self) -> None:
         if self._result:
             self.open_folder.emit(self._result.file_id)
@@ -916,108 +956,11 @@ class InspectorPanel(QWidget):
         natural_why: str,
         explanation: dict,
     ) -> str:
-        from ui.designer_labels import reason_chips, similarity_tier_label
-
-        tier = similarity_tier_label(result)
-        reasons = result.match_explanations or []
-        if not reasons and result.cluster_reason:
-            reasons = [result.cluster_reason]
-        chips = reason_chips(reasons, limit=6)
-        lines = [
-            f"<b style='font-size:13px;'>{tier}</b>",
-            f"<span style='color:#94a3b8;'>Benzerlik %{result.score_percent:.0f}</span>",
-            "",
-        ]
-        if chips:
-            lines.append("<b>Neden benzer?</b>")
-            for icon, text in chips:
-                lines.append(f"{icon} {text}")
-        else:
-            base = format_explanation_text(explanation).replace("\n", "<br>")
-            lines.append(base)
-
-        km_labels = d.get("knowledge_match_labels") or (
-            (d.get("knowledge_explanation") or {}).get("knowledge_match_labels") or []
-        )
-        k_score = float(
-            d.get("knowledge_score")
-            or (d.get("knowledge_explanation") or {}).get("knowledge_score")
-            or 0
-        )
-        k_weight = float(
-            d.get("knowledge_weight")
-            or (d.get("knowledge_explanation") or {}).get("knowledge_weight")
-            or 0
-        )
-        if km_labels or k_score > 0:
-            lines.append("")
-            lines.append("<b>Knowledge Match</b>")
-            for lab in km_labels[:8]:
-                lines.append(f"✓ {lab}")
-            lines.append("")
-            lines.append("<b>Knowledge Score</b>")
-            lines.append(f"%{k_score * 100:.0f}")
-            if k_weight > 0:
-                lines.append(
-                    f"<span style='color:#94a3b8;font-size:11px;'>"
-                    f"Ağırlık %{k_weight * 100:.0f}</span>"
-                )
-            mods = d.get("modality_weights") or (
-                (d.get("knowledge_explanation") or {}).get("modality_weights") or {}
-            )
-            if mods:
-                parts = [
-                    f"{k.title()} %{float(v) * 100:.0f}"
-                    for k, v in mods.items()
-                    if float(v or 0) > 0
-                ]
-                if parts:
-                    lines.append(
-                        "<span style='color:#64748b;font-size:11px;'>"
-                        + " · ".join(parts)
-                        + "</span>"
-                    )
-
-        rr = d.get("textile_rerank_v2") or {}
-        if rr:
-            lines.append("")
-            lines.append("<b>Textile Re-rank</b>")
-            spot = float(rr.get("spot_geometry") or 0)
-            lines.append(f"Spot Geometry %{spot * 100:.0f}")
-            if float(rr.get("family_penalty") or 0) > 0:
-                lines.append(
-                    f"<span style='color:#f87171;'>Aile cezası "
-                    f"%{float(rr['family_penalty']) * 100:.0f}</span>"
-                )
-            lines.append(
-                f"<span style='color:#64748b;font-size:11px;'>"
-                f"Emb %{float(rr.get('embedding', 0)) * 100:.0f} · "
-                f"DNA %{float(rr.get('dna', 0)) * 100:.0f} · "
-                f"Tex %{float(rr.get('texture', 0)) * 100:.0f} · "
-                f"Rep %{float(rr.get('repeat', 0)) * 100:.0f}"
-                f"</span>"
-            )
-
-        pipe = d.get("search_pipeline") or {}
-        if pipe:
-            lines.append("")
-            lines.append("<b>Search Pipeline</b>")
-            for st in pipe.get("stages") or []:
-                mark = "✓" if st.get("ok") else "✗"
-                cnt = st.get("count") or 0
-                extra = f" ({cnt})" if cnt else ""
-                lines.append(f"{st.get('name', '?')} {mark}{extra}")
-            if pipe.get("ai_active"):
-                lines.append("AI Active ✓")
-            else:
-                lines.append("AI Active ✗")
-                reason = str(pipe.get("ai_reason") or "")
-                if reason:
-                    lines.append(
-                        f"<span style='color:#f87171;font-size:11px;'>"
-                        f"Reason: {reason.splitlines()[0]}</span>"
-                    )
-        return "<br>".join(lines)
+        """Neden box content — real evidence only (no fabricated fallbacks)."""
+        # d / dna_check / why_checks / explanation kept for call-site compat;
+        # invented chip/format_explanation_text path removed.
+        _ = (d, dna_check_text, why_checks, natural_why, explanation)
+        return format_why_html(result)
 
     def _append_technical_why(
         self,
