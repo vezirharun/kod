@@ -117,8 +117,13 @@ class MainWindow(QMainWindow):
         self._source_live_stats: dict[int, dict] = {}
 
         self._search_worker: SearchWorker | None = None
+        self._pending_search: tuple | None = None  # (query, instant)
+        self._search_finish_hooked = False
 
         self._quick_index_worker: QuickIndexWorker | None = None
+        self._pending_quick_index: str | None = None
+        self._quick_finish_hooked = False
+        self._pending_source_counts: dict[int, str] = {}
 
         self._status_worker: StatusWorker | None = None
         self._lane_status_worker: StatusWorker | None = None
@@ -1189,8 +1194,18 @@ class MainWindow(QMainWindow):
         if int(getattr(self.settings, "background_full_scan_interval_min", 30) or 0) <= 0:
             logger.info("Background full scan interval=0 (manual only)")
             return
-        if self._cache_reconciliation_worker and self._cache_reconciliation_worker.isRunning():
+        old = self._cache_reconciliation_worker
+        if old is not None and old.isRunning():
             return
+        if old is not None and not old.isRunning():
+            try:
+                if hasattr(old, "arm_delete_later_on_finished"):
+                    old.arm_delete_later_on_finished()
+                else:
+                    old.deleteLater()
+            except RuntimeError:
+                pass
+            self._cache_reconciliation_worker = None
         self._cache_reconciliation_worker = CacheReconciliationWorker(
             self.settings, parent=self, once=False
         )
@@ -1203,6 +1218,8 @@ class MainWindow(QMainWindow):
         self._cache_reconciliation_worker.error.connect(
             lambda m: self.status_bar.set_message(f"Arka plan tarama hata: {m}")
         )
+        if hasattr(self._cache_reconciliation_worker, "arm_delete_later_on_finished"):
+            self._cache_reconciliation_worker.arm_delete_later_on_finished()
         self._cache_reconciliation_worker.start()
         logger.info(
             "Background full scan started interval=%s min",
@@ -1227,12 +1244,49 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self._start_cache_reconciliation)
 
     def _start_manual_full_scan(self) -> None:
-        if self._cache_reconciliation_worker and self._cache_reconciliation_worker.isRunning():
-            # Çalışan loop varken bir kez force: stop + once
+        old = self._cache_reconciliation_worker
+        if old is not None and old.isRunning():
             try:
-                self._cache_reconciliation_worker.request_stop()
+                old.request_stop()
             except Exception:
                 pass
+            if hasattr(old, "arm_delete_later_on_finished"):
+                old.arm_delete_later_on_finished()
+            # Brief wait ≤100ms; if still running, defer start via finished
+            old.wait(100)
+            if old.isRunning():
+                self.progress_panel.set_full_scan_status(
+                    "Tarama: önceki tarama durduruluyor…"
+                )
+                self.status_bar.set_message("Önceki tarama bitince yeniden başlanacak…")
+
+                def _start_once_after():
+                    try:
+                        old.deleteLater()
+                    except RuntimeError:
+                        pass
+                    if self._cache_reconciliation_worker is old:
+                        self._cache_reconciliation_worker = None
+                    self._start_manual_full_scan()
+
+                if not getattr(old, "_manual_scan_rehooked", False):
+                    old._manual_scan_rehooked = True
+                    old.finished.connect(_start_once_after)
+                return
+            try:
+                old.deleteLater()
+            except RuntimeError:
+                pass
+            self._cache_reconciliation_worker = None
+        elif old is not None:
+            try:
+                if hasattr(old, "arm_delete_later_on_finished"):
+                    old.arm_delete_later_on_finished()
+                else:
+                    old.deleteLater()
+            except RuntimeError:
+                pass
+            self._cache_reconciliation_worker = None
         self.progress_panel.set_full_scan_status("Tarama: baştan tarama çalışıyor…")
         self.status_bar.set_message("Sistem baştan taranıyor (eksik/silinen)…")
         w = CacheReconciliationWorker(self.settings, parent=self, once=True)
@@ -1245,6 +1299,8 @@ class MainWindow(QMainWindow):
                 self.status_bar.set_message(str(m)),
             )
         )
+        if hasattr(w, "arm_delete_later_on_finished"):
+            w.arm_delete_later_on_finished()
         w.start()
 
     def _on_manual_full_scan_finished(self, result: dict) -> None:
@@ -2201,14 +2257,51 @@ class MainWindow(QMainWindow):
         coverage_low = pending > indexed * 2
         return top < 0.75 or coverage_low
 
-    def _cancel_search_worker(self) -> None:
+    def _hook_search_qthread_finished(self) -> None:
+        if self._search_finish_hooked:
+            return
+        w = self._search_worker
+        if w is None:
+            return
+        self._search_finish_hooked = True
+        w.finished.connect(self._on_search_qthread_finished)
 
-        if self._search_worker and self._search_worker.isRunning():
-            self._search_worker.request_stop()
-            # UI thread'i bloklama — worker arka planda kapanır
+    def _cancel_search_worker(self) -> None:
+        w = self._search_worker
+        if w is None:
+            return
+        if w.isRunning():
+            w.request_stop()
+            self._hook_search_qthread_finished()
+            # Do not wait long; do not create a new worker; keep C++ object alive
+            return
+        try:
+            if hasattr(w, "arm_delete_later_on_finished"):
+                w.arm_delete_later_on_finished()
+            else:
+                w.deleteLater()
+        except RuntimeError:
+            pass
+        self._search_worker = None
+
+    def _on_search_qthread_finished(self) -> None:
+        sender = self.sender()
+        try:
+            if sender is not None:
+                sender.deleteLater()
+        except RuntimeError:
+            pass
+        if sender is self._search_worker:
+            self._search_worker = None
+        self._search_finish_hooked = False
+        pending = self._pending_search
+        if pending is not None:
+            self._pending_search = None
+            query, instant = pending
+            self._launch_search_worker(query, instant=bool(instant))
 
     def _cancel_search(self) -> None:
-
+        self._pending_search = None
         self._cancel_search_worker()
 
         self._set_searching(False)
@@ -2216,7 +2309,7 @@ class MainWindow(QMainWindow):
         self.status_bar.set_message("Arama iptal edildi")
 
     def _clear_search(self) -> None:
-
+        self._pending_search = None
         self._cancel_search_worker()
 
         self._search_response = None
@@ -2438,8 +2531,8 @@ class MainWindow(QMainWindow):
     def _start_search_worker(
         self, query: SearchQuery, *, instant: bool = False
     ) -> None:
+        from core.qthread_lifecycle import should_defer_new_worker
 
-        self._cancel_search_worker()
         self.results_panel.begin_new_search()
 
         page_size = int(self.cmb_limit.currentData() or 500)
@@ -2487,6 +2580,36 @@ class MainWindow(QMainWindow):
         if instant and not self._is_simple_mode():
             self.status_bar.set_message("En yakın eşleşmeler aranıyor…")
 
+        cur = self._search_worker
+        if cur is not None and should_defer_new_worker(cur.isRunning()):
+            # Single-flight: keep one SearchWorker; overwrite pending with latest
+            self._pending_search = (query, instant)
+            cur.request_stop()
+            self._hook_search_qthread_finished()
+            return
+
+        self._launch_search_worker(query, instant=instant)
+
+    def _launch_search_worker(
+        self, query: SearchQuery, *, instant: bool = False
+    ) -> None:
+        # Ensure only one SearchWorker; never start while another is running
+        cur = self._search_worker
+        if cur is not None and cur.isRunning():
+            self._pending_search = (query, instant)
+            cur.request_stop()
+            self._hook_search_qthread_finished()
+            return
+        if cur is not None and not cur.isRunning():
+            try:
+                if hasattr(cur, "arm_delete_later_on_finished"):
+                    cur.arm_delete_later_on_finished()
+                else:
+                    cur.deleteLater()
+            except RuntimeError:
+                pass
+            self._search_worker = None
+
         self._search_worker = SearchWorker(self.settings, query, parent=self)
         if self._thumb_scheduler:
             self._thumb_scheduler.cancel_all()
@@ -2499,6 +2622,8 @@ class MainWindow(QMainWindow):
         if hasattr(self._search_worker, "progress"):
             self._search_worker.progress.connect(self._on_multi_image_progress)
 
+        if hasattr(self._search_worker, "arm_delete_later_on_finished"):
+            self._search_worker.arm_delete_later_on_finished()
         self._search_worker.start()
 
     def _on_search_error(self, message: str) -> None:
@@ -2791,10 +2916,55 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(800, lambda: self._run_image_search(use_crop=False))
 
-    def _quick_index_folder_async(self, folder: str) -> None:
+    def _on_quick_index_qthread_finished(self) -> None:
+        sender = self.sender()
+        try:
+            if sender is not None:
+                sender.deleteLater()
+        except RuntimeError:
+            pass
+        if sender is self._quick_index_worker:
+            self._quick_index_worker = None
+        self._quick_finish_hooked = False
+        pending = self._pending_quick_index
+        if pending is not None:
+            self._pending_quick_index = None
+            self._launch_quick_index_worker(pending)
 
-        if self._quick_index_worker and self._quick_index_worker.isRunning():
-            self._quick_index_worker.request_stop()
+    def _quick_index_folder_async(self, folder: str) -> None:
+        old = self._quick_index_worker
+        if old is not None and old.isRunning():
+            self._pending_quick_index = folder
+            old.request_stop()
+            if hasattr(old, "arm_delete_later_on_finished"):
+                old.arm_delete_later_on_finished()
+            if not self._quick_finish_hooked:
+                self._quick_finish_hooked = True
+                old.finished.connect(self._on_quick_index_qthread_finished)
+            self.status_bar.set_message(f"Hızlı index (bekleniyor): {folder}…")
+            return
+        self._launch_quick_index_worker(folder)
+
+    def _launch_quick_index_worker(self, folder: str) -> None:
+        old = self._quick_index_worker
+        if old is not None and old.isRunning():
+            self._pending_quick_index = folder
+            old.request_stop()
+            if hasattr(old, "arm_delete_later_on_finished"):
+                old.arm_delete_later_on_finished()
+            if not self._quick_finish_hooked:
+                self._quick_finish_hooked = True
+                old.finished.connect(self._on_quick_index_qthread_finished)
+            return
+        if old is not None and not old.isRunning():
+            try:
+                if hasattr(old, "arm_delete_later_on_finished"):
+                    old.arm_delete_later_on_finished()
+                else:
+                    old.deleteLater()
+            except RuntimeError:
+                pass
+            self._quick_index_worker = None
 
         self.status_bar.set_message(f"Hızlı index: {folder}…")
 
@@ -2808,6 +2978,8 @@ class MainWindow(QMainWindow):
 
         self._quick_index_worker.finished_ok.connect(lambda _: self._refresh_status())
 
+        if hasattr(self._quick_index_worker, "arm_delete_later_on_finished"):
+            self._quick_index_worker.arm_delete_later_on_finished()
         self._quick_index_worker.start()
 
     def _add_source(self) -> None:
@@ -2896,13 +3068,48 @@ class MainWindow(QMainWindow):
             index_mode="fast_archive",
         )
 
+    def _on_source_count_qthread_finished(self, source_id: int) -> None:
+        sid = int(source_id or 0)
+        sender = self.sender()
+        try:
+            if sender is not None:
+                sender.deleteLater()
+        except RuntimeError:
+            pass
+        cur = self._source_count_workers.get(sid)
+        if sender is cur:
+            self._source_count_workers.pop(sid, None)
+        pending_root = self._pending_source_counts.pop(sid, None)
+        if pending_root is not None:
+            self._start_source_file_count(sid, pending_root)
+
     def _start_source_file_count(self, source_id: int, root_path: str) -> None:
         sid = int(source_id or 0)
         if sid <= 0:
             return
-        old = self._source_count_workers.pop(sid, None)
+        old = self._source_count_workers.get(sid)
         if old is not None and old.isRunning():
+            # Same sid: pending replace; do not orphan-destroy running worker
+            self._pending_source_counts[sid] = str(root_path or "")
             old.request_stop()
+            if hasattr(old, "arm_delete_later_on_finished"):
+                old.arm_delete_later_on_finished()
+            # Re-hook once via unique attribute
+            if not getattr(old, "_count_finish_hooked", False):
+                old._count_finish_hooked = True
+                old.finished.connect(
+                    lambda *, s=sid: self._on_source_count_qthread_finished(s)
+                )
+            return
+        if old is not None:
+            self._source_count_workers.pop(sid, None)
+            try:
+                if hasattr(old, "arm_delete_later_on_finished"):
+                    old.arm_delete_later_on_finished()
+                elif not old.isRunning():
+                    old.deleteLater()
+            except RuntimeError:
+                pass
         worker = SourceFileCountWorker(root_path, source_id=sid, parent=self)
         worker.progress.connect(
             lambda n, s=sid: self._on_source_file_count_progress(s, int(n))
@@ -2913,6 +3120,8 @@ class MainWindow(QMainWindow):
         worker.error.connect(
             lambda msg, s=sid: self._on_source_file_count_error(s, str(msg))
         )
+        if hasattr(worker, "arm_delete_later_on_finished"):
+            worker.arm_delete_later_on_finished()
         self._source_count_workers[sid] = worker
         worker.start()
 
@@ -3953,6 +4162,8 @@ class MainWindow(QMainWindow):
         )
         self._lane_status_worker._status_gen = self._status_generation
         self._lane_status_worker.finished_ok.connect(self._on_status_updated)
+        if hasattr(self._lane_status_worker, "arm_delete_later_on_finished"):
+            self._lane_status_worker.arm_delete_later_on_finished()
         self._lane_status_worker.start()
 
     def _refresh_status(self) -> None:
@@ -3976,6 +4187,8 @@ class MainWindow(QMainWindow):
         )
         self._status_worker._status_gen = self._status_generation
         self._status_worker.finished_ok.connect(self._on_status_updated)
+        if hasattr(self._status_worker, "arm_delete_later_on_finished"):
+            self._status_worker.arm_delete_later_on_finished()
         self._status_worker.start()
 
     def _on_index_progress(self, data: dict) -> None:
@@ -4284,6 +4497,17 @@ class MainWindow(QMainWindow):
 
     def _on_status_updated(self, status: dict) -> None:
         sender = self.sender()
+        # After finished, Python ref may go stale — clear if idle
+        try:
+            if sender is self._status_worker and not sender.isRunning():
+                self._status_worker = None
+            elif sender is self._lane_status_worker and not sender.isRunning():
+                self._lane_status_worker = None
+        except RuntimeError:
+            if sender is self._status_worker:
+                self._status_worker = None
+            elif sender is self._lane_status_worker:
+                self._lane_status_worker = None
         gen = getattr(sender, "_status_gen", None) if sender is not None else None
         if gen is not None and int(gen) != int(self._status_generation):
             if self._status_refresh_queued and not self._index_active:

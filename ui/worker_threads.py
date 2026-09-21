@@ -129,6 +129,13 @@ class _WorkerBase(QThread):
             return False
         return True
 
+    def arm_delete_later_on_finished(self) -> None:
+        """Connect QThread.finished → deleteLater once (idempotent)."""
+        if getattr(self, "_delete_later_armed", False):
+            return
+        self._delete_later_armed = True
+        self.finished.connect(self.deleteLater)
+
 
 class IndexWorker(_WorkerBase):
     """Phase 3: Index Engine V3 — legacy Indexer/ScanScheduler KULLANMAZ."""
@@ -148,6 +155,7 @@ class IndexWorker(_WorkerBase):
         parent=None,
     ):
         super().__init__(parent)
+        self.setObjectName("IndexWorker")
         self.settings = settings
         self.customer_filter = customer_filter
         self.scan_mode = scan_mode
@@ -908,6 +916,7 @@ class QuickIndexWorker(_WorkerBase):
 
     def __init__(self, settings: AppSettings, folder_path: str, parent=None):
         super().__init__(parent)
+        self.setObjectName("QuickIndexWorker")
         self.settings = settings
         self.folder_path = folder_path
         self._engine = None
@@ -983,6 +992,7 @@ class SearchWorker(_WorkerBase):
 
     def __init__(self, settings: AppSettings, query: SearchQuery, parent=None):
         super().__init__(parent)
+        self.setObjectName("SearchWorker")
         self.settings = settings
         self.query = query
 
@@ -1328,6 +1338,7 @@ class SourceFileCountWorker(_WorkerBase):
 
     def __init__(self, root_path: str, source_id: int = 0, parent=None):
         super().__init__(parent)
+        self.setObjectName("SourceFileCountWorker")
         self.root_path = str(root_path or "")
         self.source_id = int(source_id or 0)
 
@@ -1358,6 +1369,7 @@ class BackgroundTask(_WorkerBase):
 
     def __init__(self, function, parent=None):
         super().__init__(parent)
+        self.setObjectName("BackgroundTask")
         self.function = function
 
     def run(self) -> None:
@@ -1386,6 +1398,7 @@ class PurgeMissingWorker(_WorkerBase):
         parent=None,
     ):
         super().__init__(parent)
+        self.setObjectName("PurgeMissingWorker")
         self.settings = settings
         self.source_id = source_id or None
 
@@ -1411,6 +1424,7 @@ class StatusWorker(_WorkerBase):
 
     def __init__(self, settings: AppSettings, parent=None, *, lanes_only: bool = False):
         super().__init__(parent)
+        self.setObjectName("StatusWorker")
         self.settings = settings
         self.lanes_only = bool(lanes_only)
 
@@ -1441,6 +1455,7 @@ class CacheReconciliationWorker(_WorkerBase):
         once: bool = False,
     ):
         super().__init__(parent)
+        self.setObjectName("CacheReconciliationWorker")
         self.settings = settings
         self.once = bool(once)
         self._engine = None
@@ -1558,6 +1573,7 @@ class PurgeSourceWorker(_WorkerBase):
         self, settings: AppSettings, source_id: int, source_name: str = "", parent=None
     ):
         super().__init__(parent)
+        self.setObjectName("PurgeSourceWorker")
         self.settings = settings
         self.source_id = source_id
         self.source_name = source_name

@@ -310,7 +310,7 @@ class SearchEngine:
         ):
             self._ai_load_error = ""
             return True
-        from core.capability_check import try_load_ai_extractor
+        from core.capability_check import get_shared_ai_extractor, try_load_ai_extractor
 
         ok, msg = try_load_ai_extractor(self.settings)
         if not ok:
@@ -322,11 +322,19 @@ class SearchEngine:
                 fast_hash_only=False,
             )
             return False
-        self.extractor = FeatureExtractor(
-            use_ai=True,
-            use_gpu=self.settings.use_gpu,
-            fast_hash_only=False,
-        )
+        ext = get_shared_ai_extractor(self.settings)
+        if ext is not None:
+            self.extractor = ext
+        else:
+            # Cache miss edge case — should not construct a second AI extractor
+            self._ai_load_error = "Shared AI extractor missing after successful load"
+            logger.warning(self._ai_load_error)
+            self.extractor = FeatureExtractor(
+                use_ai=False,
+                use_gpu=self.settings.use_gpu,
+                fast_hash_only=False,
+            )
+            return False
         if not self.extractor.ai_available:
             self._ai_load_error = "FeatureExtractor yüklendi ama model bellekte yok"
             return False

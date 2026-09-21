@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import threading
 import time
 from typing import Any
 
@@ -18,6 +19,10 @@ OCR_FALLBACK_MSG = (
 _OCR_PROBE_CACHE: tuple[float, bool, str] | None = None
 _AI_PROBE_CACHE: tuple[float, bool, str] | None = None
 _PROBE_TTL_S = 30.0
+
+_AI_FE_LOCK = threading.Lock()
+_AI_FE = None  # FeatureExtractor | None
+_AI_FE_KEY = None  # tuple key (use_gpu,)
 
 
 def _module_available(name: str) -> bool:
@@ -134,59 +139,83 @@ def probe_format_dependencies() -> dict[str, Any]:
     }
 
 
+def get_shared_ai_extractor(settings):
+    """Return cached FeatureExtractor for current settings key, or None."""
+    key = (bool(getattr(settings, "use_gpu", False)),)
+    with _AI_FE_LOCK:
+        if _AI_FE is not None and _AI_FE_KEY == key and getattr(_AI_FE, "ai_available", False):
+            return _AI_FE
+        return None
+
+
 def try_load_ai_extractor(settings) -> tuple[bool, str]:
-    """DINO/CLIP yüklemeyi dene; başarısızsa detaylı sebep."""
-    dep = diagnose_ai_stack()
-    if not dep["ok"]:
-        return False, dep["message"] or AI_FALLBACK_MSG
-    try:
-        from core.feature_extractor import FeatureExtractor
-
-        t0 = time.perf_counter()
-        ext = FeatureExtractor(
-            use_ai=True,
-            use_gpu=bool(getattr(settings, "use_gpu", False)),
-            fast_hash_only=False,
-        )
-        load_s = time.perf_counter() - t0
-        if not ext.ai_available:
-            reasons = []
-            if getattr(ext, "_dino_model", None) is None:
-                reasons.append("DINOv2 failed to load into memory")
-            if getattr(ext, "_clip_model", None) is None:
-                reasons.append("OpenCLIP failed to load into memory")
-            msg = (
-                "OpenCLIP/DINO yüklenemedi\n\nSebep:\n"
-                + ("\n".join(reasons) or "Model belleğe alınamadı")
+    """DINO/CLIP yüklemeyi dene; başarısızsa detaylı sebep. Shared cache (thread-safe)."""
+    with _AI_FE_LOCK:
+        key = (bool(getattr(settings, "use_gpu", False)),)
+        global _AI_FE, _AI_FE_KEY
+        if _AI_FE is not None and _AI_FE_KEY == key and _AI_FE.ai_available:
+            provider = []
+            if getattr(_AI_FE, "_clip_model", None) is not None:
+                provider.append("OpenCLIP ViT-B-32")
+            if getattr(_AI_FE, "_dino_model", None) is not None:
+                provider.append("DINOv2 ViT-S/14")
+            return True, (
+                f"AI Model OK (cached) ({', '.join(provider) or 'unknown'}) "
+                f"device={getattr(_AI_FE, 'device', 'cpu')}"
             )
-            return False, msg
-        # smoke embed
+        dep = diagnose_ai_stack()
+        if not dep["ok"]:
+            return False, dep["message"] or AI_FALLBACK_MSG
         try:
-            import numpy as np
+            from core.feature_extractor import FeatureExtractor
 
-            arr = np.zeros((64, 64, 3), dtype=np.uint8)
-            feats = ext.extract_from_array(
-                arr, include_patches=False, deep_analysis=False
+            t0 = time.perf_counter()
+            ext = FeatureExtractor(
+                use_ai=True,
+                use_gpu=bool(getattr(settings, "use_gpu", False)),
+                fast_hash_only=False,
             )
-            has_emb = bool(feats.dino_embedding or feats.clip_embedding)
-            if not has_emb:
-                return False, (
-                    "OpenCLIP/DINO yüklendi ama embedding üretilemedi\n\n"
-                    "Sebep:\nfirst embedding returned empty"
+            load_s = time.perf_counter() - t0
+            if not ext.ai_available:
+                reasons = []
+                if getattr(ext, "_dino_model", None) is None:
+                    reasons.append("DINOv2 failed to load into memory")
+                if getattr(ext, "_clip_model", None) is None:
+                    reasons.append("OpenCLIP failed to load into memory")
+                msg = (
+                    "OpenCLIP/DINO yüklenemedi\n\nSebep:\n"
+                    + ("\n".join(reasons) or "Model belleğe alınamadı")
                 )
-        except Exception as exc:
-            return False, (
-                f"OpenCLIP/DINO yüklendi ama embedding testi başarısız\n\nSebep:\n{exc}"
+                return False, msg
+            # smoke embed
+            try:
+                import numpy as np
+
+                arr = np.zeros((64, 64, 3), dtype=np.uint8)
+                feats = ext.extract_from_array(
+                    arr, include_patches=False, deep_analysis=False
+                )
+                has_emb = bool(feats.dino_embedding or feats.clip_embedding)
+                if not has_emb:
+                    return False, (
+                        "OpenCLIP/DINO yüklendi ama embedding üretilemedi\n\n"
+                        "Sebep:\nfirst embedding returned empty"
+                    )
+            except Exception as exc:
+                return False, (
+                    f"OpenCLIP/DINO yüklendi ama embedding testi başarısız\n\nSebep:\n{exc}"
+                )
+            provider = []
+            if getattr(ext, "_clip_model", None) is not None:
+                provider.append("OpenCLIP ViT-B-32")
+            if getattr(ext, "_dino_model", None) is not None:
+                provider.append("DINOv2 ViT-S/14")
+            ok_msg = (
+                f"AI Model OK ({', '.join(provider) or 'unknown'}) "
+                f"device={ext.device} load={load_s:.1f}s"
             )
-        provider = []
-        if getattr(ext, "_clip_model", None) is not None:
-            provider.append("OpenCLIP ViT-B-32")
-        if getattr(ext, "_dino_model", None) is not None:
-            provider.append("DINOv2 ViT-S/14")
-        ok_msg = (
-            f"AI Model OK ({', '.join(provider) or 'unknown'}) "
-            f"device={ext.device} load={load_s:.1f}s"
-        )
-        return True, ok_msg
-    except Exception as exc:
-        return False, f"OpenCLIP/DINO yüklenemedi\n\nSebep:\n{exc}"
+            _AI_FE = ext
+            _AI_FE_KEY = key
+            return True, ok_msg
+        except Exception as exc:
+            return False, f"OpenCLIP/DINO yüklenemedi\n\nSebep:\n{exc}"

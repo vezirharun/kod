@@ -32,6 +32,7 @@ class _ProductionWorker(QThread):
 
     def __init__(self, task: str, settings, parent=None):
         super().__init__(parent)
+        self.setObjectName("_ProductionWorker")
         self.task = task
         self.settings = settings
         self._report: dict | None = None

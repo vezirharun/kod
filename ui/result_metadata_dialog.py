@@ -444,6 +444,7 @@ class _OptionsWorker(QThread):
 
     def __init__(self, db_path: str, parent=None):
         super().__init__(parent)
+        self.setObjectName("_OptionsWorker")
         self._db_path = str(db_path or "")
 
     def run(self) -> None:
