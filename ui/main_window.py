@@ -1960,10 +1960,7 @@ class MainWindow(QMainWindow):
             or meta.get("streaming")
             or meta.get("progressive_stage")
             or meta.get("fast_hash_only")
-            or (
-                getattr(self, "_search_worker", None)
-                and self._search_worker.isRunning()
-            )
+            or self._is_search_worker_running()
         )
         updated = False
         # Progressive: sadece gorunen pencereyi ve kucuk tamponu guncelle.
@@ -2014,15 +2011,13 @@ class MainWindow(QMainWindow):
 
         if self._is_simple_mode():
             self._search_result_count = above
-            worker = getattr(self, "_search_worker", None)
-            if worker and worker.isRunning():
+            if self._is_search_worker_running():
                 self._search_refining = bool(
                     self._search_response.meta.get("fast_hash_only")
                 )
             self._update_user_status_bar()
         else:
-            worker = getattr(self, "_search_worker", None)
-            if worker and worker.isRunning():
+            if self._is_search_worker_running():
                 if self._search_response.meta.get("fast_hash_only"):
                     self.status_bar.set_message(
                         f"Hızlı sonuçlar ({above:,}) — derin analiz ve sıralama güncelleniyor…"
@@ -2050,9 +2045,7 @@ class MainWindow(QMainWindow):
             self.results_panel.update_page_footer(stats)
 
     def _on_ui_perf_updated(self, snap) -> None:
-        search_q = 1 if (
-            getattr(self, "_search_worker", None) and self._search_worker.isRunning()
-        ) else 0
+        search_q = 1 if self._is_search_worker_running() else 0
         if self._ui_perf:
             self._ui_perf.set_search_queue(search_q)
             if self._thumb_scheduler:
@@ -2257,6 +2250,24 @@ class MainWindow(QMainWindow):
         coverage_low = pending > indexed * 2
         return top < 0.75 or coverage_low
 
+    def _search_worker_alive(self) -> bool:
+        from core.qthread_lifecycle import qobject_is_alive
+
+        return qobject_is_alive(getattr(self, "_search_worker", None))
+
+    def _is_search_worker_running(self) -> bool:
+        from core.qthread_lifecycle import qthread_is_running
+
+        return qthread_is_running(getattr(self, "_search_worker", None))
+
+    def _clear_search_worker_ref_if_same(self, worker) -> None:
+        """Clear Python ref when THAT worker's C++ object is destroyed.
+
+        Must not call methods on the deleted QObject (zombie wrapper).
+        """
+        if self._search_worker is worker:
+            self._search_worker = None
+
     def _hook_search_qthread_finished(self) -> None:
         if self._search_finish_hooked:
             return
@@ -2267,21 +2278,24 @@ class MainWindow(QMainWindow):
         w.finished.connect(self._on_search_qthread_finished)
 
     def _cancel_search_worker(self) -> None:
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
         w = self._search_worker
         if w is None:
             return
-        if w.isRunning():
+        if qthread_is_running(w):
             w.request_stop()
             self._hook_search_qthread_finished()
             # Do not wait long; do not create a new worker; keep C++ object alive
             return
-        try:
-            if hasattr(w, "arm_delete_later_on_finished"):
-                w.arm_delete_later_on_finished()
-            else:
-                w.deleteLater()
-        except RuntimeError:
-            pass
+        if qobject_is_alive(w):
+            try:
+                if hasattr(w, "arm_delete_later_on_finished"):
+                    w.arm_delete_later_on_finished()
+                else:
+                    w.deleteLater()
+            except RuntimeError:
+                pass
         self._search_worker = None
 
     def _on_search_qthread_finished(self) -> None:
@@ -2531,7 +2545,7 @@ class MainWindow(QMainWindow):
     def _start_search_worker(
         self, query: SearchQuery, *, instant: bool = False
     ) -> None:
-        from core.qthread_lifecycle import should_defer_new_worker
+        from core.qthread_lifecycle import qthread_is_running, should_defer_new_worker
 
         self.results_panel.begin_new_search()
 
@@ -2581,7 +2595,7 @@ class MainWindow(QMainWindow):
             self.status_bar.set_message("En yakın eşleşmeler aranıyor…")
 
         cur = self._search_worker
-        if cur is not None and should_defer_new_worker(cur.isRunning()):
+        if cur is not None and should_defer_new_worker(qthread_is_running(cur)):
             # Single-flight: keep one SearchWorker; overwrite pending with latest
             self._pending_search = (query, instant)
             cur.request_stop()
@@ -2593,24 +2607,33 @@ class MainWindow(QMainWindow):
     def _launch_search_worker(
         self, query: SearchQuery, *, instant: bool = False
     ) -> None:
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
         # Ensure only one SearchWorker; never start while another is running
         cur = self._search_worker
-        if cur is not None and cur.isRunning():
+        if qthread_is_running(cur):
             self._pending_search = (query, instant)
             cur.request_stop()
             self._hook_search_qthread_finished()
             return
-        if cur is not None and not cur.isRunning():
-            try:
-                if hasattr(cur, "arm_delete_later_on_finished"):
-                    cur.arm_delete_later_on_finished()
-                else:
-                    cur.deleteLater()
-            except RuntimeError:
-                pass
+        if cur is not None:
+            if qobject_is_alive(cur):
+                try:
+                    if hasattr(cur, "arm_delete_later_on_finished"):
+                        cur.arm_delete_later_on_finished()
+                    else:
+                        cur.deleteLater()
+                except RuntimeError:
+                    pass
             self._search_worker = None
 
         self._search_worker = SearchWorker(self.settings, query, parent=self)
+        # When C++ object dies (e.g. finished→deleteLater without finish hook),
+        # clear the Python ref so later isRunning() sites never see a zombie.
+        _sw = self._search_worker
+        _sw.destroyed.connect(
+            lambda *_a, w=_sw: self._clear_search_worker_ref_if_same(w)
+        )
         if self._thumb_scheduler:
             self._thumb_scheduler.cancel_all()
 

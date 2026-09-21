@@ -289,3 +289,215 @@ class TestPanelObjectNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestQObjectAliveHelpers(unittest.TestCase):
+    """Safe guards must not raise libshiboken RuntimeError on deleted wrappers."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_none_is_not_alive_and_not_running(self):
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
+        self.assertFalse(qobject_is_alive(None))
+        self.assertFalse(qthread_is_running(None))
+
+    def test_living_qthread_reports_running_state(self):
+        from PySide6.QtCore import QThread
+
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
+        t = QThread()
+        self.assertTrue(qobject_is_alive(t))
+        self.assertFalse(qthread_is_running(t))
+        t.start()
+        self.assertTrue(qthread_is_running(t))
+        t.quit()
+        self.assertTrue(t.wait(3000))
+        self.assertTrue(qobject_is_alive(t))
+        self.assertFalse(qthread_is_running(t))
+        t.deleteLater()
+        self._app.processEvents()
+
+    def test_deleted_wrapper_safe_helpers_return_false(self):
+        from PySide6.QtCore import QObject
+        from shiboken6 import isValid, delete
+
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
+        obj = QObject()
+        self.assertTrue(qobject_is_alive(obj))
+        delete(obj)
+        self.assertFalse(isValid(obj))
+        # Critical: must NOT raise RuntimeError
+        self.assertFalse(qobject_is_alive(obj))
+        self.assertFalse(qthread_is_running(obj))
+
+    def test_deleted_qthread_isrunning_safe(self):
+        from PySide6.QtCore import QThread
+        from shiboken6 import delete, isValid
+
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
+        t = QThread()
+        delete(t)
+        self.assertFalse(isValid(t))
+        self.assertFalse(qobject_is_alive(t))
+        self.assertFalse(qthread_is_running(t))
+
+
+class TestSearchWorkerRefClearOnDestroyed(unittest.TestCase):
+    """Python _search_worker becomes None when C++ object is destroyed."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_clear_on_destroyed_clears_same_instance_only(self):
+        from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThread
+        from shiboken6 import delete
+
+        class Holder:
+            def __init__(self):
+                self._search_worker = None
+
+            def _clear_search_worker_ref_if_same(self, worker) -> None:
+                if self._search_worker is worker:
+                    self._search_worker = None
+
+        def _flush_deletes():
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self._app.processEvents()
+
+        h = Holder()
+        w = QThread()
+        other = QThread()
+        h._search_worker = w
+        w.destroyed.connect(lambda *_a, ww=w: h._clear_search_worker_ref_if_same(ww))
+        delete(w)  # immediate C++ destroy → destroyed signal
+        _flush_deletes()
+        self.assertIsNone(h._search_worker)
+
+        h._search_worker = other
+        # Destroying a different worker must not clear current ref
+        gone = QObject()
+        gone.destroyed.connect(
+            lambda *_a, ww=gone: h._clear_search_worker_ref_if_same(ww)
+        )
+        delete(gone)
+        _flush_deletes()
+        self.assertIs(h._search_worker, other)
+        delete(other)
+        _flush_deletes()
+
+    def test_finished_arm_delete_later_clears_ref(self):
+        """Mirrors SearchWorker path: finished → deleteLater → destroyed → clear."""
+        from PySide6.QtCore import QThread
+
+        class Holder:
+            def __init__(self):
+                self._search_worker = None
+
+            def _clear_search_worker_ref_if_same(self, worker) -> None:
+                if self._search_worker is worker:
+                    self._search_worker = None
+
+            def _is_search_worker_running(self) -> bool:
+                from core.qthread_lifecycle import qthread_is_running
+
+                return qthread_is_running(self._search_worker)
+
+        h = Holder()
+        w = QThread()
+        h._search_worker = w
+        w.destroyed.connect(lambda *_a, ww=w: h._clear_search_worker_ref_if_same(ww))
+        w.finished.connect(w.deleteLater)
+        self.assertFalse(h._is_search_worker_running())
+        w.start()
+        self.assertTrue(h._is_search_worker_running())
+        w.quit()
+        self.assertTrue(w.wait(3000))
+        # Process deleteLater + destroyed
+        for _ in range(20):
+            self._app.processEvents()
+            if h._search_worker is None:
+                break
+        self.assertIsNone(h._search_worker)
+        self.assertFalse(h._is_search_worker_running())
+
+
+class TestSearchSingleFlightHotfix(unittest.TestCase):
+    def test_new_search_after_finished(self):
+        from core.qthread_lifecycle import qthread_is_running, should_defer_new_worker
+
+        class FakeWorker:
+            def __init__(self, running=False):
+                self._running = running
+
+            def isRunning(self):
+                return self._running
+
+        running = FakeWorker(True)
+        self.assertTrue(should_defer_new_worker(qthread_is_running(running)))
+
+        done = FakeWorker(False)
+        self.assertFalse(should_defer_new_worker(qthread_is_running(done)))
+
+        # After clear
+        self.assertFalse(should_defer_new_worker(qthread_is_running(None)))
+
+    def test_cancel_then_new_search_logic(self):
+        from core.qthread_lifecycle import qthread_is_running, should_defer_new_worker
+
+        state = {"worker": None, "pending": None, "launched": []}
+
+        class FakeWorker:
+            def __init__(self, name):
+                self.name = name
+                self._running = True
+                self.stop_requested = False
+
+            def isRunning(self):
+                return self._running
+
+            def request_stop(self):
+                self.stop_requested = True
+                self._running = False
+
+        def start(name):
+            cur = state["worker"]
+            if cur is not None and should_defer_new_worker(qthread_is_running(cur)):
+                state["pending"] = name
+                cur.request_stop()
+                return "defer"
+            state["worker"] = FakeWorker(name)
+            state["launched"].append(name)
+            return "launch"
+
+        def on_finished():
+            state["worker"] = None
+            pending = state["pending"]
+            if pending is not None:
+                state["pending"] = None
+                start(pending)
+
+        self.assertEqual(start("a"), "launch")
+        self.assertEqual(start("b"), "defer")
+        self.assertTrue(state["worker"].stop_requested)
+        on_finished()
+        self.assertEqual(state["launched"], ["a", "b"])
+        self.assertEqual(state["worker"].name, "b")
+
+        # Rapid cancel → new
+        state["worker"].request_stop()
+        state["pending"] = None  # cancel clears pending
+        on_finished()
+        self.assertIsNone(state["worker"])
+        self.assertEqual(start("c"), "launch")
+        self.assertEqual(state["worker"].name, "c")
