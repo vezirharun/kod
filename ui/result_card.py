@@ -21,10 +21,6 @@ from core.display_match_percent import (
 from core.dynamic_groups import QueryContext
 from core.search_engine import SearchResult
 from ui.designer_labels import (
-    brand_badge_text,
-    color_badge_text,
-    family_badge_for_result,
-    independent_feature_badge,
     similarity_tier_label,
     stage_label,
 )
@@ -40,14 +36,6 @@ _THUMB = {VIEW_CARD: 88, VIEW_LIST: 72, VIEW_COMPACT: 52, VIEW_LARGE: 120}
 _CONF_LABEL_CACHE: dict[int, tuple[str, str]] = {}
 
 
-def _chip(text: str, bg: str, fg: str = "#fff") -> QLabel:
-    lbl = QLabel(text)
-    lbl.setStyleSheet(
-        f"background:{bg};color:{fg};padding:2px 8px;border-radius:4px;"
-        "font-size:10px;font-weight:600;"
-    )
-    lbl.setMaximumWidth(160)
-    return lbl
 
 
 class ResultCard(QFrame):
@@ -165,24 +153,8 @@ class ResultCard(QFrame):
         info = QVBoxLayout()
         info.setSpacing(4)
 
-        # Designer badges: family / color / brand
-        badges = QHBoxLayout()
-        badges.setSpacing(6)
-        fam = family_badge_for_result(self.result)
-        if fam:
-            badges.addWidget(_chip(fam, "#0f766e"))
-        extra = independent_feature_badge(self.result)
-        if extra:
-            badges.addWidget(_chip(extra, "#334155"))
-        color = color_badge_text(self.result.color_family)
-        if color:
-            badges.addWidget(_chip(color, "#9a3412"))
-        brand = brand_badge_text(self.result)
-        if brand:
-            badges.addWidget(_chip(brand, "#1e3a5f", "#e2e8f0"))
-        badges.addStretch()
-        if self.view_mode != VIEW_COMPACT:
-            info.addLayout(badges)
+        # List/result cards: do not show AI style / color / brand chips.
+        # Backend metadata and inspector detail remain unchanged.
 
         # Filename — readable, not overpowered by scores
         fname_raw = self.result.filename
