@@ -28,6 +28,9 @@ _SIZE_TOKENS = frozenset(
         "xl",
         "xxl",
         "xxxl",
+        "2xl",
+        "3xl",
+        "4xl",
         "xs",
         "sm",
         "md",
@@ -42,6 +45,29 @@ _SIZE_TOKENS = frozenset(
         "büyük",
     }
 )
+
+# Garment production parts — metadata only; NEVER stripped for stem equality alone.
+_GARMENT_PART_TOKENS = frozenset(
+    {
+        "ön",
+        "on",
+        "arka",
+        "kol",
+        "manşet",
+        "manset",
+        "yaka",
+        "metraj",
+        "ay",
+        "parça",
+        "parca",
+        "parçası",
+        "parcasi",
+        "parçasi",
+    }
+)
+
+# Hard signals that may pair with CLIP for consensus (never CLIP alone).
+_CLIP_CONSENSUS_HARD = frozenset({"stem", "path", "family"})
 _VARIANT_TOKENS = frozenset(
     {
         "final",
@@ -111,6 +137,7 @@ class FamilyMember:
     color_family: str = ""
     confidence: float = 0.0
     clip: Any = None  # optional np.ndarray
+    dino: Any = None  # optional np.ndarray (read-only hydrate)
     card: Any = None
 
 
@@ -249,20 +276,136 @@ def _parent_key(path: str) -> str:
         return str(p.parent).lower() if str(p.parent) else ""
 
 
+def _meaningful_dir_parts(path: str) -> list[str]:
+    """Directory components only — skip filename, roots, and drive letters."""
+    try:
+        parts = list(Path(path).parts)
+    except Exception:
+        return []
+    if parts:
+        parts = parts[:-1]  # drop filename
+    out: list[str] = []
+    root_tokens = {".", "/", chr(92)}
+    for x in parts:
+        xl = str(x or "").strip().lower().rstrip("/" + chr(92))
+        if not xl or xl in root_tokens:
+            continue
+        # Windows drive root e.g. "c:"
+        if len(xl) == 2 and xl[1] == ":":
+            continue
+        out.append(xl)
+    return out[-2:] if out else []
+
+
+
 def path_affinity(path_a: str, path_b: str) -> bool:
     if not path_a or not path_b:
         return False
     pa, pb = _parent_key(path_a), _parent_key(path_b)
     if pa and pb and pa == pb:
         return True
+    # Shared meaningful folder name (not OS root / drive). Prevents Windows
+    # Path.parts root token intersecting across unrelated "/x" vs "/y" paths.
+    da, db = _meaningful_dir_parts(path_a), _meaningful_dir_parts(path_b)
+    if not da or not db:
+        return False
+    return bool(set(da) & set(db))
+
+
+def design_scope_dirs(path: str, *, max_up: int = 2) -> list[str]:
+    """Parent + ancestors (size/part folder names walk up). Not customer-root unlimited."""
+    out: list[str] = []
     try:
-        parts_a = [x.lower() for x in Path(path_a).parts[-3:-1] if x not in (".", "/")]
-        parts_b = [x.lower() for x in Path(path_b).parts[-3:-1] if x not in (".", "/")]
+        cur = Path(path).parent
     except Exception:
+        return out
+
+    def _is_root(p: Path) -> bool:
+        try:
+            s = str(p).strip().lower().rstrip("\\/")
+            if not s or s in (".", "/", "\\"):
+                return True
+            # Windows drive root: "c:" or "c:\"
+            if len(s) == 2 and s[1] == ":":
+                return True
+            if len(s) == 3 and s[1] == ":" and s[2] in ("\\", "/"):
+                return True
+            name = p.name
+            if not name or name in ("\\", "/", ""):
+                return True
+            return False
+        except Exception:
+            return True
+
+    size_part = _SIZE_TOKENS | _GARMENT_PART_TOKENS | {
+        "mlxl",
+        "m-l-xl",
+        "xxl",
+        "3xl",
+        "4xl",
+        "on",
+        "ön",
+        "arka",
+        "kol",
+        "yaka",
+        "manset",
+        "manşet",
+    }
+    for _ in range(max(1, int(max_up) + 1)):
+        if _is_root(cur):
+            break
+        s = str(cur)
+        if not s or s in out:
+            break
+        out.append(s)
+        name = re.sub(r"[^a-z0-9]+", "", cur.name.lower())
+        tokenish = any(
+            str(t).replace("-", "") in name or str(t) in cur.name.lower() for t in size_part
+        )
+        if tokenish or re.fullmatch(
+            r"(m-?l-?xl|xxl.?3xl.?4xl|s-?m-?l)", cur.name.lower().replace(" ", "")
+        ):
+            cur = cur.parent
+            continue
+        # one extra ancestor for job folder when we started in a size subfolder
+        if len(out) == 1:
+            cur = cur.parent
+            continue
+        break
+    # Drop any accidental roots
+    return [d for d in out if d and not _is_root(Path(d))]
+
+    size_part = _SIZE_TOKENS | _GARMENT_PART_TOKENS | {
+        "mlxl", "m-l-xl", "xxl", "3xl", "4xl", "on", "ön", "arka", "kol", "yaka", "manset", "manşet",
+    }
+    for _ in range(max(1, int(max_up) + 1)):
+        s = str(cur)
+        if not s or s in out:
+            break
+        out.append(s)
+        name = re.sub(r"[^a-z0-9]+", "", cur.name.lower())
+        # walk up when folder looks like a size/part bucket
+        tokenish = any(t.replace("-", "") in name or t in cur.name.lower() for t in size_part)
+        if tokenish or re.fullmatch(r"(m-?l-?xl|xxl.?3xl.?4xl|s-?m-?l)", cur.name.lower().replace(" ", "")):
+            cur = cur.parent
+            continue
+        # one extra ancestor for job folder (gömlek1) when we started in size subfolder
+        if len(out) == 1:
+            cur = cur.parent
+            continue
+        break
+    return out
+
+
+def design_scope_affinity(path_a: str, path_b: str) -> bool:
+    """True when both paths share a design-scope directory (sibling subfolders OK)."""
+    if path_affinity(path_a, path_b):
+        return True
+    da = {d.lower() for d in design_scope_dirs(path_a)}
+    db = {d.lower() for d in design_scope_dirs(path_b)}
+    if not da or not db:
         return False
-    if not parts_a or not parts_b:
-        return False
-    return bool(set(parts_a) & set(parts_b))
+    return bool(da & db)
 
 
 def _leaf(text: str) -> str:
@@ -359,6 +502,208 @@ def _cosine(a: Any, b: Any) -> float:
         return 0.0
 
 
+
+def garment_part_token(filename: str) -> str:
+    """Return known garment-part token if present (metadata; not a merge key alone)."""
+    stem = Path(str(filename or "")).stem
+    stem = stem.replace("-", "_").replace(" ", "_")
+    parts = [p.lower() for p in re.split(r"[_\.]+", stem) if p]
+    for p in parts:
+        if p in _GARMENT_PART_TOKENS:
+            return p
+        # multi-word like "ay_parçası" already split
+    joined = "_".join(parts)
+    for tok in ("ay_parçası", "ay_parcasi", "ay_parçasi", "kol_manşet", "kol_manset"):
+        if tok in joined:
+            return tok
+    return ""
+
+
+def decode_clip_blob(raw: Any) -> Any:
+    """Decode stored CLIP bytes/array → float32 vector. No new embedding."""
+    if raw is None:
+        return None
+    try:
+        import numpy as np
+
+        if isinstance(raw, np.ndarray):
+            vec = np.asarray(raw, dtype=np.float32).ravel()
+        elif isinstance(raw, (bytes, bytearray, memoryview)):
+            b = bytes(raw)
+            if len(b) < 16 or (len(b) % 4) != 0:
+                return None
+            vec = np.frombuffer(b, dtype=np.float32).copy()
+        elif isinstance(raw, (list, tuple)):
+            vec = np.asarray(raw, dtype=np.float32).ravel()
+        else:
+            return None
+        if vec.size == 0 or not np.isfinite(vec).all():
+            return None
+        return vec
+    except Exception:
+        return None
+
+
+def _feature_db_paths(db_path: str) -> list[str]:
+    """Prefer live patterns DB for features; also try write-path sibling if distinct."""
+    paths: list[str] = []
+    raw = str(db_path or "").strip()
+    if raw:
+        paths.append(raw)
+    try:
+        alt = str(_write_path(raw)) if raw else ""
+    except Exception:
+        alt = ""
+    if alt and alt not in paths:
+        paths.append(alt)
+    # Common layout: patterns.db next to search_memory.db
+    for base in list(paths):
+        try:
+            parent = Path(base).parent
+            for name in ("patterns.db", "pattern_search.db", "vezir.db"):
+                cand = str(parent / name)
+                if cand not in paths and Path(cand).is_file():
+                    paths.append(cand)
+        except Exception:
+            pass
+    return paths
+
+
+def load_clip_vectors_for_ids(db_path: str, file_ids: Iterable[int]) -> dict[int, Any]:
+    """Read-only hydrate of existing CLIP blobs from features (+ concept_examples).
+
+    Uses the live DB path (not search_memory redirect) so features.clip_embedding
+    is visible. No new embedding / Indexer / DINO.
+    """
+    ids = sorted({int(x) for x in file_ids if int(x) > 0})
+    if not ids or not db_path:
+        return {}
+    out: dict[int, Any] = {}
+    ph = ",".join("?" * len(ids))
+    for db_file in _feature_db_paths(db_path):
+        try:
+            c = sqlite3.connect(str(db_file), timeout=10)
+            c.row_factory = sqlite3.Row
+        except Exception:
+            continue
+        try:
+            try:
+                rows = c.execute(
+                    f"""SELECT file_id, clip_embedding FROM features
+                        WHERE file_id IN ({ph})
+                          AND clip_embedding IS NOT NULL
+                          AND length(clip_embedding) >= 16""",
+                    ids,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for r in rows:
+                fid = int(r["file_id"])
+                if fid in out:
+                    continue
+                vec = decode_clip_blob(r["clip_embedding"])
+                if vec is not None:
+                    out[fid] = vec
+            missing = [i for i in ids if i not in out]
+            if missing:
+                ph2 = ",".join("?" * len(missing))
+                for sql in (
+                    f"""SELECT file_id, embedding FROM concept_examples
+                        WHERE file_id IN ({ph2})
+                          AND role IN ('positive','pos')
+                          AND IFNULL(source,'user') NOT IN ('candidate')
+                          AND embedding IS NOT NULL AND length(embedding) >= 16""",
+                    f"""SELECT file_id, embedding FROM concept_examples
+                        WHERE file_id IN ({ph2})
+                          AND embedding IS NOT NULL AND length(embedding) >= 16""",
+                ):
+                    try:
+                        erows = c.execute(sql, missing).fetchall()
+                    except sqlite3.OperationalError:
+                        erows = []
+                    for r in erows:
+                        fid = int(r["file_id"] or 0)
+                        if fid <= 0 or fid in out:
+                            continue
+                        vec = decode_clip_blob(r["embedding"])
+                        if vec is not None:
+                            out[fid] = vec
+                    missing = [i for i in missing if i not in out]
+                    if not missing:
+                        break
+        finally:
+            c.close()
+        if len(out) >= len(ids):
+            break
+    return out
+
+
+
+def load_dino_vectors_for_ids(db_path: str, file_ids: Iterable[int]) -> dict[int, Any]:
+    """Read-only hydrate of existing DINO blobs from features. No new embedding."""
+    out: dict[int, Any] = {}
+    ids = [int(x) for x in file_ids if int(x or 0) > 0]
+    if not ids or not str(db_path or "").strip():
+        return out
+    ph = ",".join("?" * len(ids))
+    for path in _feature_db_paths(db_path):
+        try:
+            import sqlite3
+
+            c = sqlite3.connect(str(path), timeout=10)
+            try:
+                rows = c.execute(
+                    f"SELECT file_id, dino_embedding FROM features WHERE file_id IN ({ph})",
+                    ids,
+                ).fetchall()
+            finally:
+                c.close()
+        except Exception:
+            continue
+        for fid, blob in rows:
+            vec = decode_clip_blob(blob)
+            if vec is not None:
+                out[int(fid)] = vec
+        if len(out) >= len(ids):
+            break
+    return out
+
+
+def hydrate_member_clips(
+    members: Sequence[FamilyMember],
+    *,
+    db_path: str = "",
+) -> None:
+    """Fill member.clip from card bytes / DB features / taught embeddings (in-place)."""
+    if not members:
+        return
+    for m in members:
+        if m.clip is not None:
+            continue
+        card = m.card
+        if card is None:
+            continue
+        raw = getattr(card, "clip_embedding", None)
+        vec = decode_clip_blob(raw)
+        if vec is not None:
+            m.clip = vec
+    need = [int(m.file_id) for m in members if m.clip is None and int(m.file_id) > 0]
+    if not need or not db_path:
+        return
+    loaded = load_clip_vectors_for_ids(db_path, need)
+    for m in members:
+        if m.clip is None:
+            vec = loaded.get(int(m.file_id))
+            if vec is not None:
+                m.clip = vec
+    need_d = [int(m.file_id) for m in members if getattr(m, "dino", None) is None and int(m.file_id) > 0]
+    if need_d and db_path:
+        loaded_d = load_dino_vectors_for_ids(db_path, need_d)
+        for m in members:
+            if getattr(m, "dino", None) is None and int(m.file_id) in loaded_d:
+                m.dino = loaded_d[int(m.file_id)]
+
+
 def pair_family_signals(
     a: FamilyMember,
     b: FamilyMember,
@@ -385,7 +730,7 @@ def pair_family_signals(
     if stem_a and stem_b and stem_a == stem_b and len(stem_a) >= 3:
         signals.append("stem")
 
-    if path_affinity(a.path, b.path):
+    if path_affinity(a.path, b.path) or design_scope_affinity(a.path, b.path):
         signals.append("path")
 
     pf_a = _leaf(a.pattern_family) or _leaf(a.guess)
@@ -424,16 +769,30 @@ def pair_family_signals(
     clip = _cosine(a.clip, b.clip)
     if clip >= CLIP_ALIGN:
         signals.append("clip")
+    dino = _cosine(getattr(a, "dino", None), getattr(b, "dino", None))
+    if dino >= CLIP_ALIGN:
+        signals.append("dino")
 
-    hard = [s for s in signals if s != "clip"]
-    # Consensus rules: never clip-alone; never generic-family-alone
+    hard = [s for s in signals if s not in ("clip", "dino")]
+    # Consensus: never visual-alone; never filename/stem-alone; never path-alone;
+    # allow PATH+CLIP/DINO or FAMILY+CLIP/DINO (additive). Do not strip garment parts
+    # for stem equality — size tokens remain helper-only metadata.
     if not hard:
         return [], 0.0
-    if len(hard) < MIN_HARD_SIGNALS and not (
-        "stem" in hard and "clip" in signals
-    ):
+    visual = "clip" in signals or "dino" in signals
+    visual_assisted = visual and any(s in _CLIP_CONSENSUS_HARD for s in hard)
+    if len(hard) < MIN_HARD_SIGNALS and not visual_assisted:
         return [], 0.0
-    if hard == ["family"] or hard == ["variant"]:
+    # Without visual: allow stem+path or stem+named-family size variants only.
+    # Path+family (e.g. generic Marka) without stem/visual is NOT enough.
+    if not visual:
+        if "stem" in hard and ("path" in hard or "family" in hard):
+            pass
+        else:
+            return [], 0.0
+    if hard == ["variant"]:
+        return [], 0.0
+    if hard == ["family"] and "clip" not in signals:
         return [], 0.0
 
     conf = 0.35 + 0.18 * len(hard)
@@ -441,6 +800,8 @@ def pair_family_signals(
         conf += 0.12
     if "clip" in signals:
         conf += 0.08 * min(1.0, (clip - CLIP_ALIGN) / 0.1 + 1.0)
+    if "dino" in signals:
+        conf += 0.08 * min(1.0, (dino - CLIP_ALIGN) / 0.1 + 1.0)
     conf = max(0.0, min(0.97, conf))
     return signals, conf
 
@@ -471,6 +832,8 @@ def build_family_candidates(
     items = [m for m in members if int(m.file_id) > 0]
     if len(items) < MIN_MEMBERS:
         return []
+    if db_path and any(m.clip is None for m in items):
+        hydrate_member_clips(items, db_path=db_path)
     banned = rejected_family_fingerprints(db_path) if db_path else set()
     parent: dict[int, int] = {int(m.file_id): int(m.file_id) for m in items}
     by_id = {int(m.file_id): m for m in items}
@@ -554,6 +917,7 @@ def build_family_candidates(
 
 
 def member_from_card(card: Any) -> FamilyMember:
+    raw = getattr(card, "clip_embedding", None) if card is not None else None
     return FamilyMember(
         file_id=int(getattr(card, "file_id", 0) or 0),
         filename=str(getattr(card, "filename", "") or ""),
@@ -564,7 +928,7 @@ def member_from_card(card: Any) -> FamilyMember:
         category=str(getattr(card, "category", "") or ""),
         color_family=str(getattr(card, "color_family", "") or ""),
         confidence=float(getattr(card, "confidence", 0) or 0),
-        clip=None,
+        clip=decode_clip_blob(raw),
         card=card,
     )
 
@@ -584,6 +948,8 @@ def collapse_pools_with_families(
             m = member_from_card(card)
             if m.file_id > 0:
                 flat.append(m)
+    # Read-only CLIP hydrate from DB/blob — no new embedding / Indexer / DINO.
+    hydrate_member_clips(flat, db_path=db_path)
     candidates = build_family_candidates(
         flat, db_path=db_path, min_confidence=min_confidence
     )

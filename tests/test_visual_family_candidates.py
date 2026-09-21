@@ -120,8 +120,9 @@ def test_clip_alone_no_family():
     import numpy as np
 
     v = np.ones(8, dtype=np.float32)
-    a = _m(1, "alpha.tif", guess="x", pattern_family="unknown")
-    b = _m(2, "beta.tif", guess="y", pattern_family="unknown")
+    # Distinct folders — path affinity must not fire; CLIP alone is insufficient.
+    a = _m(1, "alpha.tif", path="/x/alpha.tif", guess="x", pattern_family="unknown")
+    b = _m(2, "beta.tif", path="/y/beta.tif", guess="y", pattern_family="unknown")
     a.clip = v
     b.clip = v.copy()
     sigs, conf = pair_family_signals(a, b)

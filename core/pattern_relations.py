@@ -25,9 +25,13 @@ from core.duplicate_detection import (
 )
 from core.visual_family_candidates import (
     FamilyMember,
+    hydrate_member_clips,
     is_rejected_family,
     normalize_variant_stem,
+    pair_family_signals,
     path_affinity,
+    design_scope_dirs,
+    design_scope_affinity,
 )
 
 SECTION_SAME = "ayni_desen"
@@ -215,6 +219,9 @@ def _build_relations(
         loaded = "index"
 
     if stage == "full":
+        # Additive body/part completion via existing PATH+CLIP / FAMILY+CLIP consensus
+        for item in _from_part_completion(db, db_path, src, src_member, claimed):
+            _claim(buckets, claimed, item, src_folder, src_customer)
         if include_similar:
             for item in _from_near_similar(db, src, src_member, claimed):
                 _claim(buckets, claimed, item, src_folder, src_customer)
@@ -320,6 +327,11 @@ def _load_record(db: Any, file_id: int) -> dict[str, Any] | None:
 
 def _member_from_rec(rec: dict[str, Any]) -> FamilyMember:
     tm = rec.get("texture_map") if isinstance(rec.get("texture_map"), dict) else {}
+    from core.visual_family_candidates import decode_clip_blob
+
+    raw = rec.get("clip_embedding")
+    if raw is None and isinstance(tm, dict):
+        raw = tm.get("clip_embedding")
     return FamilyMember(
         file_id=int(rec.get("id") or rec.get("file_id") or 0),
         filename=str(rec.get("filename") or ""),
@@ -340,6 +352,7 @@ def _member_from_rec(rec: dict[str, Any]) -> FamilyMember:
             )
             or ""
         ),
+        clip=decode_clip_blob(raw),
     )
 
 
@@ -636,6 +649,196 @@ def _from_hash_peers(
             )
         )
     return out
+
+
+
+def _design_candidate_records(
+    db: Any,
+    db_path: str,
+    src: dict[str, Any],
+    *,
+    limit: int = 60,
+) -> list[dict[str, Any]]:
+    """Harvest part-completion candidates under design-scope dirs (not exact parent only).
+
+    Includes sibling size/part subfolders. Also merges Tanımsızlar cards that share
+    a design-scope directory. Does not invent embeddings.
+    """
+    path = str(src.get("path") or "")
+    if not path:
+        return []
+    dirs = design_scope_dirs(path, max_up=2)
+    if not dirs:
+        try:
+            dirs = [str(Path(path).parent)]
+        except Exception:
+            return []
+    seen: set[int] = set()
+    out: list[dict[str, Any]] = []
+    fid = int(src.get("id") or 0)
+    for d in dirs:
+        rows: list[dict[str, Any]] = []
+        try:
+            if hasattr(db, "list_files_in_directory"):
+                rows = list(db.list_files_in_directory(d, limit=min(80, limit)) or [])
+        except Exception:
+            rows = []
+        for rec in rows:
+            mid = int(rec.get("id") or rec.get("file_id") or 0)
+            if mid <= 0 or mid == fid or mid in seen:
+                continue
+            seen.add(mid)
+            out.append(rec)
+            if len(out) >= limit:
+                return out
+    # Extra path-prefix scan already covers Tanımsız siblings under the same
+    # design-scope directories via list_files_in_directory (includes unclassified).
+    # Avoid list_inbox_pools here — too heavy for relation builds.
+    return out
+
+
+def _same_customer_or_unknown(src: dict[str, Any], other: dict[str, Any], db_path: str) -> bool:
+    """Reject when both resolve to different known customers."""
+    a = _customer_label(src, db_path=db_path)
+    b = _customer_label(other, db_path=db_path)
+    if a and b and a != b:
+        return False
+    return True
+
+
+def _from_part_completion(
+    db: Any,
+    db_path: str,
+    src: dict[str, Any],
+    src_member: FamilyMember,
+    claimed: set[int],
+) -> list[RelationItem]:
+    """Design-scope siblings that pass path/visual consensus → VARYANTLAR.
+
+    Additive on Bu Desenin Diğerleri. Not taught_family.
+    Subfolders OK. Tanımsızlar OK when consensus holds.
+    Requires visual (CLIP/DINO) + path/design-scope, OR stem+path size variants.
+    Never filename-only. Never cross-customer.
+    """
+    out: list[RelationItem] = []
+    path = str(src.get("path") or "")
+    if not path:
+        return out
+    siblings = _design_candidate_records(db, db_path, src, limit=60)
+    if not siblings:
+        return out
+
+    fid = int(src.get("id") or 0)
+    members: list[FamilyMember] = [src_member]
+    id_to_rec: dict[int, dict[str, Any]] = {}
+    for rec in siblings:
+        mid = int(rec.get("id") or rec.get("file_id") or 0)
+        if mid <= 0 or mid == fid or mid in claimed:
+            continue
+        if not _same_customer_or_unknown(src, rec, db_path):
+            continue
+        other = _member_from_rec(rec)
+        if not _compatible(src_member, other):
+            continue
+        # Must share design scope (sibling folders allowed)
+        if not design_scope_affinity(path, str(rec.get("path") or other.path or "")):
+            continue
+        members.append(other)
+        id_to_rec[mid] = rec
+
+    if len(members) < 2:
+        return out
+
+    try:
+        hydrate_member_clips(members, db_path=db_path or str(getattr(db, "db_path", "") or ""))
+    except Exception:
+        pass
+
+    src_m = members[0]
+    for other in members[1:]:
+        mid = int(other.file_id)
+        if mid in claimed or mid not in id_to_rec:
+            continue
+        try:
+            if db_path and is_rejected_family(db_path, [fid, mid]):
+                continue
+        except Exception:
+            pass
+        # Force path signal via design-scope when pair_family_signals path_affinity is narrow
+        if design_scope_affinity(src_m.path, other.path) and not path_affinity(src_m.path, other.path):
+            # temporarily share parent-key for signal — use pair after copying path? better: check signals then augment
+            pass
+        signals, conf = pair_family_signals(src_m, other)
+        # Augment: design-scope counts as path for completion when visual present
+        sigs = list(signals or [])
+        if design_scope_affinity(src_m.path, other.path) and "path" not in sigs:
+            # Only inject path when visual evidence exists (CLIP/DINO) or stem match
+            has_visual = "clip" in sigs or "dino" in sigs
+            has_stem = "stem" in sigs
+            if has_visual or has_stem:
+                sigs = ["path"] + sigs
+                conf = max(float(conf or 0), 0.55)
+        if not sigs or conf <= 0:
+            continue
+        visual = "clip" in sigs or "dino" in sigs
+        hard = [s for s in sigs if s not in ("clip", "dino")]
+        # Require: (path/design + visual) OR (stem + path) — never visual alone, never family alone
+        ok = False
+        if visual and "path" in hard:
+            ok = True
+        elif visual and "family" in hard:
+            ok = True
+        elif "stem" in hard and "path" in hard:
+            ok = True
+        if not ok:
+            continue
+        # Different garment parts / no shared stem → demand stronger visual align
+        try:
+            from core.visual_family_candidates import (
+                garment_part_token,
+                normalize_variant_stem,
+                _cosine,
+                CLIP_ALIGN,
+            )
+            stem_a = normalize_variant_stem(src_m.filename)
+            stem_b = normalize_variant_stem(other.filename)
+            part_a = garment_part_token(src_m.filename)
+            part_b = garment_part_token(other.filename)
+            stems_differ = bool(stem_a and stem_b and stem_a != stem_b)
+            parts_differ = bool(part_a and part_b and part_a != part_b)
+            if stems_differ or parts_differ:
+                clip_v = _cosine(getattr(src_m, "clip", None), getattr(other, "clip", None))
+                dino_v = _cosine(getattr(src_m, "dino", None), getattr(other, "dino", None))
+                # Stricter than base CLIP_ALIGN when joining dissimilar names in same folder
+                if max(clip_v, dino_v) < max(0.90, float(CLIP_ALIGN) + 0.05):
+                    continue
+        except Exception:
+            pass
+        reason = "multi_signal"
+        if "clip" in sigs and "path" in hard:
+            reason = "path_clip_consensus"
+        elif "dino" in sigs and "path" in hard:
+            reason = "path_dino_consensus"
+        elif "clip" in sigs and "family" in hard:
+            reason = "family_clip_consensus"
+        elif "dino" in sigs and "family" in hard:
+            reason = "family_dino_consensus"
+        elif "stem" in hard and "path" in hard:
+            reason = "stem_path_size_variant"
+        section = SECTION_VARIANT
+        if "family" in hard and "stem" not in hard:
+            section = SECTION_FAMILY
+        out.append(
+            _item_from_rec(
+                id_to_rec[mid],
+                section=section,
+                relation="part_completion",
+                score=float(conf),
+                reason=reason,
+            )
+        )
+    return out
+
 
 
 def _from_near_similar(
