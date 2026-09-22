@@ -65,7 +65,12 @@ class FormatStatusPanel(QWidget):
         inner.addWidget(self.table)
 
     def set_db_path(self, db_path: str) -> None:
-        self._db_path = db_path
+        new = str(db_path or "")
+        if new == self._db_path and self.table.rowCount() > 0:
+            return
+        self._db_path = new
+        if new:
+            self.refresh()
 
     def refresh(self) -> None:
         self._refresh_dependencies()

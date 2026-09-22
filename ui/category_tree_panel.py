@@ -27,7 +27,12 @@ class CategoryTreePanel(QWidget):
         self._populate_tree()
 
     def set_db_path(self, db_path: str) -> None:
-        self._db_path = str(db_path or "")
+        new = str(db_path or "")
+        # StatusWorker ticks used to call this every ~1s and rebuild the whole
+        # tree on the UI thread (freeze stacks → _populate_tree / set_db_path).
+        if new == self._db_path and self.tree.topLevelItemCount() > 0:
+            return
+        self._db_path = new
         self.refresh()
 
     def refresh(self) -> None:

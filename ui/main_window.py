@@ -397,14 +397,25 @@ class MainWindow(QMainWindow):
             ),
         )
         self.results_panel.set_thumbnail_scheduler(self._thumb_scheduler)
-        self._ui_perf = UiPerfMonitor(
-            log_dir=Path(self.settings.db_path).parent / "logs",
-            parent=self,
-        )
-        self._ui_perf.updated.connect(self._on_ui_perf_updated)
-        self._thumb_scheduler.thumbnail_ready.connect(
-            lambda *_a: self._ui_perf.record_thumbnail_loaded() if self._ui_perf else None
-        )
+        import os as _os
+
+        if _os.environ.get("VEZIR_QA_NONINTERACTIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            self._ui_perf = None
+        else:
+            self._ui_perf = UiPerfMonitor(
+                log_dir=Path(self.settings.db_path).parent / "logs",
+                parent=self,
+            )
+            self._ui_perf.updated.connect(self._on_ui_perf_updated)
+            self._thumb_scheduler.thumbnail_ready.connect(
+                lambda *_a: self._ui_perf.record_thumbnail_loaded()
+                if self._ui_perf
+                else None
+            )
         self._content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._content_splitter.setObjectName("ContentSplitter")
         self._content_splitter.addWidget(self.results_panel)
@@ -1159,6 +1170,14 @@ class MainWindow(QMainWindow):
         self.inspector_panel.ai_prediction_action.connect(self._on_ai_prediction_action)
 
     def _start_health_monitor(self) -> None:
+        import os
+
+        if os.environ.get("VEZIR_QA_NONINTERACTIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
         if self._shutting_down:
             return
         try:
@@ -1186,6 +1205,14 @@ class MainWindow(QMainWindow):
 
     def _start_cache_reconciliation(self) -> None:
         """V3 arka plan full scan (gap + silinen) — index drain'den bağımsız."""
+        import os
+
+        if os.environ.get("VEZIR_QA_NONINTERACTIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
         if self._shutting_down:
             return
         if not bool(getattr(self.settings, "background_full_scan_enabled", True)):
@@ -2110,6 +2137,15 @@ class MainWindow(QMainWindow):
                 self.status_bar.set_message(extra)
 
     def _check_resume_index_on_startup(self) -> None:
+        import os
+
+        # Headless/autonomous QA: never open ResumeIndexDialog (blocks + freezes).
+        if os.environ.get("VEZIR_QA_NONINTERACTIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
         if self._shutting_down or self._resume_index_suppressed:
             return
         if not getattr(self.settings, "resume_index_on_startup", True):
@@ -2196,6 +2232,14 @@ class MainWindow(QMainWindow):
         )
 
     def _maybe_offer_on_demand_scan(self, response) -> None:
+        import os
+
+        if os.environ.get("VEZIR_QA_NONINTERACTIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
         if not response:
             return
         from core.db import Database
@@ -3761,6 +3805,16 @@ class MainWindow(QMainWindow):
         )
 
     def _load_customers(self) -> None:
+        import os
+
+        if os.environ.get("VEZIR_QA_NONINTERACTIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            self._customer_load_running = False
+            self._apply_customers([])
+            return
         if self._customer_load_running:
             return
         self._customer_load_running = True
@@ -4172,22 +4226,44 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _clear_lane_status_worker_ref_if_same(self, worker) -> None:
+        """Clear Python ref when THAT lane StatusWorker C++ object is destroyed."""
+        if getattr(self, "_lane_status_worker", None) is worker:
+            self._lane_status_worker = None
+
+    def _clear_status_worker_ref_if_same(self, worker) -> None:
+        """Clear Python ref when THAT full StatusWorker C++ object is destroyed."""
+        if getattr(self, "_status_worker", None) is worker:
+            self._status_worker = None
+
     def _refresh_status_during_index(self) -> None:
         """Index sırasında yalnız SSOT lane COUNT — ağır dashboard'dan bağımsız."""
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
         if not self._index_active:
             return
         self._sync_scope_selection_from_checkboxes()
         # Ayrı worker: full status JOIN lanes yenilemesini ASLA engellemez
-        if self._lane_status_worker and self._lane_status_worker.isRunning():
+        cur = getattr(self, "_lane_status_worker", None)
+        if qthread_is_running(cur):
             return
-        self._lane_status_worker = StatusWorker(
-            self.settings, parent=self, lanes_only=True
-        )
-        self._lane_status_worker._status_gen = self._status_generation
-        self._lane_status_worker.finished_ok.connect(self._on_status_updated)
-        if hasattr(self._lane_status_worker, "arm_delete_later_on_finished"):
-            self._lane_status_worker.arm_delete_later_on_finished()
-        self._lane_status_worker.start()
+        # Zombie wrapper after deleteLater — drop Python ref before spawning.
+        if cur is not None and not qobject_is_alive(cur):
+            self._lane_status_worker = None
+        w = StatusWorker(self.settings, parent=self, lanes_only=True)
+        self._lane_status_worker = w
+        w._status_gen = self._status_generation
+        w.finished_ok.connect(self._on_status_updated)
+        if hasattr(w, "arm_delete_later_on_finished"):
+            w.arm_delete_later_on_finished()
+        try:
+            w.destroyed.connect(
+                lambda *_a, worker=w: self._clear_lane_status_worker_ref_if_same(worker)
+            )
+        except Exception:
+            pass
+        w.start()
+
 
     def _refresh_status(self) -> None:
 
@@ -4201,18 +4277,28 @@ class MainWindow(QMainWindow):
             self._refresh_status_during_index()
             return
 
-        if self._status_worker and self._status_worker.isRunning():
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
+        cur = getattr(self, "_status_worker", None)
+        if qthread_is_running(cur):
             self._status_refresh_queued = True
             return
+        if cur is not None and not qobject_is_alive(cur):
+            self._status_worker = None
 
-        self._status_worker = StatusWorker(
-            self.settings, parent=self, lanes_only=False
-        )
-        self._status_worker._status_gen = self._status_generation
-        self._status_worker.finished_ok.connect(self._on_status_updated)
-        if hasattr(self._status_worker, "arm_delete_later_on_finished"):
-            self._status_worker.arm_delete_later_on_finished()
-        self._status_worker.start()
+        w = StatusWorker(self.settings, parent=self, lanes_only=False)
+        self._status_worker = w
+        w._status_gen = self._status_generation
+        w.finished_ok.connect(self._on_status_updated)
+        if hasattr(w, "arm_delete_later_on_finished"):
+            w.arm_delete_later_on_finished()
+        try:
+            w.destroyed.connect(
+                lambda *_a, worker=w: self._clear_status_worker_ref_if_same(worker)
+            )
+        except Exception:
+            pass
+        w.start()
 
     def _on_index_progress(self, data: dict) -> None:
         if str(data.get("stage") or "") == "source_discover":
@@ -4520,18 +4606,20 @@ class MainWindow(QMainWindow):
 
     def _on_status_updated(self, status: dict) -> None:
         sender = self.sender()
-        # After finished, Python ref may go stale — clear if idle
-        try:
-            if sender is self._status_worker and not sender.isRunning():
-                self._status_worker = None
-            elif sender is self._lane_status_worker and not sender.isRunning():
-                self._lane_status_worker = None
-        except RuntimeError:
-            if sender is self._status_worker:
-                self._status_worker = None
-            elif sender is self._lane_status_worker:
-                self._lane_status_worker = None
-        gen = getattr(sender, "_status_gen", None) if sender is not None else None
+        # finished_ok => drop Python refs by identity only (no isRunning on sender).
+        # deleteLater may already have run; never touch C++ without qobject_is_alive.
+        from core.qthread_lifecycle import qobject_is_alive
+
+        if sender is self._status_worker:
+            self._status_worker = None
+        elif sender is self._lane_status_worker:
+            self._lane_status_worker = None
+        gen = None
+        if qobject_is_alive(sender):
+            try:
+                gen = getattr(sender, "_status_gen", None)
+            except RuntimeError:
+                gen = None
         if gen is not None and int(gen) != int(self._status_generation):
             if self._status_refresh_queued and not self._index_active:
                 self._status_refresh_queued = False
@@ -4565,10 +4653,18 @@ class MainWindow(QMainWindow):
         status["cache_dir"] = self.settings.cache_dir
 
         if hasattr(self, "format_status_panel"):
-            self.format_status_panel.set_db_path(self.settings.db_path)
+            fsp = self.format_status_panel
+            # Avoid rebuilding format panel on every StatusWorker tick (UI freeze).
+            if getattr(fsp, "_db_path", None) != self.settings.db_path:
+                fsp.set_db_path(self.settings.db_path)
 
         if hasattr(self, "category_tree_panel"):
-            self.category_tree_panel.set_db_path(self.settings.db_path)
+            # set_db_path is idempotent for same path; still avoid redundant calls.
+            ctp = self.category_tree_panel
+            if getattr(ctp, "_db_path", None) != self.settings.db_path or (
+                hasattr(ctp, "tree") and ctp.tree.topLevelItemCount() == 0
+            ):
+                ctp.set_db_path(self.settings.db_path)
 
         self.progress_panel.update_status(status)
 
@@ -4646,6 +4742,8 @@ class MainWindow(QMainWindow):
 
         self._cancel_search_worker()
 
+        from core.qthread_lifecycle import qobject_is_alive, qthread_is_running
+
         for w in (
             self._index_worker,
             *list((self._index_workers or {}).values()),
@@ -4656,10 +4754,15 @@ class MainWindow(QMainWindow):
             self._lane_status_worker,
             self._cache_reconciliation_worker,
         ):
-            if w and w.isRunning():
+            if not qthread_is_running(w):
+                continue
+            if not qobject_is_alive(w):
+                continue
+            try:
                 w.request_stop()
-
                 w.wait_until_finished()
+            except RuntimeError:
+                pass
 
         for task in list(self._background_tasks):
             if task.isRunning():
