@@ -1305,6 +1305,26 @@ class SearchEngine:
                     bool(result.debug.get("text_family_conflict")) for result in all_scored
                 )
                 all_scored.sort(key=self._engine_sort_key)
+            elif query.use_crop:
+                # Area Select: no fake text — route by crop visual profile evidence
+                # through the same soft layer as pattern text search.
+                try:
+                    from core.intent_evidence_routing import (
+                        apply_intent_evidence_routing,
+                        plan_from_visual_profile,
+                    )
+
+                    crop_plan = plan_from_visual_profile(query_profile)
+                    if crop_plan.wanted:
+                        all_scored = apply_intent_evidence_routing(
+                            all_scored,
+                            "",
+                            has_image=True,
+                            plan=crop_plan,
+                        )
+                        all_scored.sort(key=self._engine_sort_key)
+                except Exception as exc:
+                    logger.debug("crop visual evidence routing skipped: %s", exc)
 
             all_scored.sort(key=self._engine_sort_key)
 
@@ -5539,8 +5559,8 @@ class SearchEngine:
             )
             score = max(score, patch_pattern_score)
 
-        if crop_search:
-            score = min(1.0, score * 0.75 + patch_sim * 0.35 + texture_sim * 0.15)
+        # Area Select uses the same score composition as full-image search.
+        # (Former crop-only patch/texture rewrite diverged from pattern ranking.)
 
         debug: dict[str, Any] = {}
         knowledge_explanation: dict[str, Any] = {}
@@ -5860,7 +5880,6 @@ class SearchEngine:
                 _suppress_pf = False
         if (
             not _suppress_pf
-            and not crop_search
             and not protected_match
             and (
                 same_animal_print
@@ -5877,6 +5896,8 @@ class SearchEngine:
             score = max(float(score), lifted)
             debug["pattern_first_soft"] = True
             debug["pattern_first_same_animal"] = bool(same_animal_print)
+            if crop_search:
+                debug["pattern_first_crop_aligned"] = True
         elif _suppress_pf and same_animal_print:
             debug["pattern_first_suppressed_by_intent"] = True
 

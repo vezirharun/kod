@@ -315,18 +315,81 @@ def collect_candidate_evidence(result: Any) -> dict[str, Any]:
     return ev
 
 
+def plan_from_visual_profile(profile: Any) -> IntentEvidencePlan:
+    """Build evidence plan from crop/full query TextureProfile — no fake text.
+
+    Reuses the same evidence classes as text intent routing so Area Select
+    can share pattern-aware soft ranking without inventing a text query.
+    """
+    if profile is None:
+        return IntentEvidencePlan()
+    if isinstance(profile, dict):
+        fam = normalize_turkish(str(profile.get("pattern_family") or ""))
+        apt = normalize_turkish(str(profile.get("animal_print_type") or ""))
+        subtype = normalize_turkish(str(profile.get("pattern_subtype") or ""))
+        tm = profile.get("texture_map") if isinstance(profile.get("texture_map"), dict) else {}
+    else:
+        fam = normalize_turkish(str(getattr(profile, "pattern_family", "") or ""))
+        apt = normalize_turkish(str(getattr(profile, "animal_print_type", "") or ""))
+        subtype = normalize_turkish(str(getattr(profile, "pattern_subtype", "") or ""))
+        tm = getattr(profile, "texture_map", None)
+        tm = tm if isinstance(tm, dict) else {}
+    if not apt:
+        apt = normalize_turkish(str(tm.get("animal_print_type") or ""))
+    if not fam:
+        fam = normalize_turkish(str(tm.get("pattern_family") or ""))
+
+    wanted: set[str] = set()
+    values: dict[str, str] = {}
+    _non = {
+        "",
+        "unknown",
+        "plain",
+        "texture_ground",
+        "document",
+        "icon_logo_non_textile",
+    }
+    if apt or fam == "animal_print":
+        wanted.add("pattern")
+        values["pattern"] = apt or "animal_print"
+    elif fam == "floral" or subtype in {"floral", "flower"}:
+        wanted.add("pattern")
+        values["pattern"] = "floral"
+    elif fam and fam not in _non and fam != "garment_photo":
+        wanted.add("pattern")
+        values["pattern"] = fam
+    if fam == "garment_photo":
+        wanted.add("person")
+        wanted.add("product")
+    return IntentEvidencePlan(
+        raw="[visual_profile]",
+        wanted=frozenset(wanted),
+        values=values,
+        compound=len(wanted) >= 2,
+        intent=None,
+    )
+
+
 def apply_intent_evidence_routing(
     results: list[Any],
     query_text: str,
     *,
     has_image: bool = True,
     db_path: str | None = None,
+    plan: IntentEvidencePlan | None = None,
 ) -> list[Any]:
-    """Soft reweight by query intent. No-op when text empty (visual-only)."""
-    text = " ".join((query_text or "").strip().split())
-    if not text or not results:
+    """Soft reweight by query intent or an explicit visual-profile plan.
+
+    Text empty + no plan → no-op (pure visual-only unchanged).
+    Crop with plan_from_visual_profile → same soft evidence layer as text pattern search.
+    """
+    if not results:
         return results
-    plan = build_intent_evidence_plan(text, db_path=db_path)
+    if plan is None:
+        text = " ".join((query_text or "").strip().split())
+        if not text:
+            return results
+        plan = build_intent_evidence_plan(text, db_path=db_path)
     if not plan.wanted:
         return results
 
@@ -394,9 +457,24 @@ def apply_intent_evidence_routing(
                 )
             )
             if qv and cv and qv != cv and kind in {"pattern", "object"}:
-                # Related family still counts as secondary.
-                delta += W_SECONDARY * 0.5
-                matched.append(f"~{kind}")
+                # Soft credit only for related pattern values (e.g. leopard↔animal),
+                # never for cross-family (leopard↔floral).
+                related = False
+                if kind == "pattern":
+                    _animals = {
+                        "leopard",
+                        "zebra",
+                        "snake",
+                        "tiger",
+                        "cheetah",
+                        "giraffe",
+                        "cow",
+                        "animal_print",
+                    }
+                    related = qv in _animals and cv in _animals
+                if related:
+                    delta += W_SECONDARY * 0.5
+                    matched.append(f"~{kind}")
                 continue
             w = W_PRIMARY if i == 0 and not plan.compound else W_SECONDARY
             if plan.compound:
