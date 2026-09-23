@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 from PySide6.QtCore import QThread, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -197,3 +198,60 @@ def test_multiselect_teach_failure_restores_cards(qapp, tmp_path):
         for i in range(panel.list_suspicious.count())
     }
     assert set(ids).issubset(restored)
+
+
+def test_real_card_ctrl_click_selection_and_visual_state(qapp, tmp_path):
+    """Gerçek QWidget click: normal + Ctrl çoklu seçim ve görünür seçili durumu."""
+    panel, _ids = _seed_suspicious_common_rivals(tmp_path, 3)
+    lw = panel.list_suspicious
+    cards = [lw.itemWidget(lw.item(i)) for i in range(3)]
+
+    # Normal click → yalnızca ilk kart.
+    QTest.mouseClick(cards[0], Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert panel.selected_ids() == [_ids[0]]
+    assert cards[0]._selected is True
+
+    # Ctrl click → ikinci kart seçime eklenir.
+    QTest.keyPress(cards[1], Qt.Key.Key_Control)
+    QTest.mouseClick(
+        cards[1],
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    QTest.keyRelease(cards[1], Qt.Key.Key_Control)
+    qapp.processEvents()
+    assert set(panel.selected_ids()) == {_ids[0], _ids[1]}
+    assert cards[0]._selected is True
+    assert cards[1]._selected is True
+
+    # Ctrl click ilk kart → seçimden çıkar.
+    QTest.mouseClick(
+        cards[0],
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    qapp.processEvents()
+    assert panel.selected_ids() == [_ids[1]]
+    assert cards[0]._selected is False
+    assert cards[1]._selected is True
+
+
+def test_real_card_right_click_forwards_to_pool_context_menu(qapp, tmp_path, monkeypatch):
+    """Kartın üstündeki gerçek sağ tık, QListWidget context-menu path'ine ulaşmalı."""
+    panel, _ids = _seed_suspicious_common_rivals(tmp_path, 3)
+    lw = panel.list_suspicious
+    card = lw.itemWidget(lw.item(0))
+
+    # Gerçek menu açmadan forwarding'i doğrula.
+    seen = []
+
+    def _capture(pos):
+        seen.append(pos)
+
+    monkeypatch.setattr(panel, "_on_pool_context_menu", _capture)
+    QTest.mouseClick(card, Qt.MouseButton.RightButton)
+    qapp.processEvents()
+
+    assert seen, "Kart üstündeki sağ tık panel context-menu handler'ına ulaşmadı."
+    assert hasattr(seen[0], "x") and hasattr(seen[0], "y")
