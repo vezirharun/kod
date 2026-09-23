@@ -1,0 +1,35 @@
+{
+  "timestamp": "20260923_151639",
+  "root_cause": [
+    "Full-frame CLIP/DINO encode person/pose; primary weights favor them over DNA/patch",
+    "crop_search explicitly boosts patch+texture; full image does not",
+    "family_score_cap=0.40 on animal_print vs floral/marble even when animal_print_type matches"
+  ],
+  "pairwise_vs_2jpg": {
+    "3.jpg": {"clip": 0.9104, "dino": 0.795, "dna": 1.0, "family": "animal_print"},
+    "4.jpg": {"clip": 0.805, "dino": 0.3173, "dna": 0.29, "family": "marble_abstract"},
+    "6.jpg": {"clip": 0.825, "dino": 0.3546, "dna": 1.0, "family": "animal_print"},
+    "8.jpg": {"clip": 0.8079, "dino": 0.2767, "dna": 0.29, "family": "floral", "animal": "leopard"}
+  },
+  "missing_in_folder_index": ["5.jpg", "7.jpg", "9.jpg", "10.jpg", "Untitled-1.jpg"],
+  "patch": {
+    "group_gates.family_score_cap_same_subtype": 0.88,
+    "search_engine.same_animal_print_relief": true,
+    "blind_weight_change": false
+  },
+  "tests": {
+    "test_pattern_first_animal_relief": "PASS",
+    "test_search_intelligence_unification": "PASS",
+    "test_search_evidence_gate": "PASS"
+  },
+  "scores": {
+    "AUDIT": "PASS",
+    "ROOT_CAUSE": "PASS",
+    "MINIMAL_PATCH": "PASS",
+    "LIVE_FULL_CHAIN": "UNTESTED",
+    "FAIL": 0,
+    "WARNING": 2,
+    "BLOCKED": 1
+  },
+  "push": false
+}

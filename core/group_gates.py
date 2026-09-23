@@ -288,6 +288,10 @@ def family_score_cap(
         return 0.75
     if rel == "related":
         return 0.60
+    # Unrelated family labels, but same animal_print_type (e.g. floral mislabel
+    # on a leopard fabric) — do not hard-cap at 0.40; keep pattern identity.
+    if same_subtype:
+        return 0.88
     return 0.40
 
 

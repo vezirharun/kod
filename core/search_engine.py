@@ -1059,11 +1059,20 @@ class SearchEngine:
         if bool(getattr(self.settings, "face_index_enabled", False)) and query.image_path:
             try:
                 from core.face_search import FaceSearch
+
+                # execute_search image path has no local `limit` — use query/settings.
+                face_limit = int(
+                    getattr(query, "limit", 0)
+                    or getattr(self.settings, "search_result_limit", 0)
+                    or 400
+                )
                 face_matches = FaceSearch(
                     getattr(self.settings, "face_db_path", ""),
                     threshold=float(getattr(self.settings, "face_identity_threshold", 0.62) or 0.62),
                     min_margin=float(getattr(self.settings, "face_identity_min_margin", 0.05) or 0.05),
-                ).image_matches(query.image_path, limit=max(2000, int(limit or 400)))
+                ).image_matches(
+                    query.image_path, limit=max(2000, int(face_limit or 400))
+                )
             except Exception as exc:
                 logger.debug("Face visual retrieval atlandı: %s", exc)
                 face_matches = {}
@@ -5606,10 +5615,17 @@ class SearchEngine:
             and cf_n_early not in _NON_FAMILY
             and _family_relationship(qf_n_early, cf_n_early) in ("same", "related")
         )
+        same_animal_print = bool(
+            str(qp.animal_print_type or "").strip()
+            and str(cand_prof_early.animal_print_type or "").strip()
+            and str(qp.animal_print_type).strip().casefold()
+            == str(cand_prof_early.animal_print_type).strip().casefold()
+        )
         family_evidence = max(
             1.0 if same_family_evidence else 0.0,
             1.0 if same_collection else 0.0,
             1.0 if same_series else 0.0,
+            1.0 if same_animal_print else 0.0,
             dna_sim if (_family_compatible and dna_match_fields.get("Family")) else 0.0,
             semantic_sim if (_family_compatible and semantic_sim >= 0.62) else 0.0,
             motif_sim if (_family_compatible and motif_sim >= 0.62) else 0.0,
@@ -5680,6 +5696,10 @@ class SearchEngine:
             knowledge_explanation = {}
         if same_family_evidence:
             pattern_family_score = min(1.0, pattern_family_score + 0.12)
+        if same_animal_print:
+            # Same indexed animal_print_type = pattern identity across views/reps
+            # even when pattern_family label disagrees (e.g. floral mislabel).
+            pattern_family_score = min(1.0, pattern_family_score + 0.20)
         if same_collection:
             pattern_family_score = min(1.0, pattern_family_score + 0.10)
         if same_series:
@@ -5688,11 +5708,13 @@ class SearchEngine:
             same_family_evidence
             or same_collection
             or same_series
+            or same_animal_print
             or (_family_compatible and dna_sim >= 0.72 and dna_match_fields.get("Family"))
             or (_family_compatible and semantic_sim >= 0.70 and motif_sim >= 0.55)
         )
         # Yapısal benzerlik düşükse doku/patch tek başına skoru yükseltemesin.
-        # Aynı family / güçlü DNA / semantic varsa gate gevşer.
+        # Aynı family / aynı animal_print_type / güçlü DNA varsa gate gevşer
+        # (model ön ↔ kumaş/metraj: phash düşük olsa da pattern identity korunur).
         if not protected_match and global_score < 0.62 and phash_sim < 0.85:
             structural_cap = 0.28 + global_score * 0.50 + patch_sim * 0.05
             if family_relief:
@@ -5707,6 +5729,7 @@ class SearchEngine:
             score = min(score, structural_cap)
         if not protected_match and family_evidence >= 0.55:
             score = max(score, min(0.88, pattern_family_score))
+        # pattern_first_soft applied after structural/low-hash caps (below)
         strong_hash = phash_sim >= 0.95 and dhash_sim >= 0.90
         if is_self:
             score = 1.0
@@ -5749,17 +5772,23 @@ class SearchEngine:
         elif phash_sim >= 0.95 and dhash_sim >= 0.95:
             score = max(score, 0.94)
 
-        score, cluster_group_pre, cluster_reason_pre = (
-            self._apply_family_mismatch_penalty(
-                query_family,
-                cand_prof_early,
-                score,
-                "",
-                "",
-                phash_sim=phash_sim,
-                patch_sim=patch_sim,
+        if same_animal_print:
+            # Family label mismatch must not punish shared animal_print_type
+            # (e.g. animal_print query vs floral-mislabeled leopard fabric).
+            score, cluster_group_pre, cluster_reason_pre = score, "", ""
+            debug["family_mismatch_skipped_same_animal"] = True
+        else:
+            score, cluster_group_pre, cluster_reason_pre = (
+                self._apply_family_mismatch_penalty(
+                    query_family,
+                    cand_prof_early,
+                    score,
+                    "",
+                    "",
+                    phash_sim=phash_sim,
+                    patch_sim=patch_sim,
+                )
             )
-        )
 
         # Düşük yapısal benzerlik alakasız görselleri aşağı iter; ancak
         # güçlü Pattern Family kanıtı varsa family skorunu tekrar ezme.
@@ -5786,7 +5815,30 @@ class SearchEngine:
                     low_hash_cap,
                     min(0.88, pattern_family_score),
                 )
+            if same_animal_print:
+                low_hash_cap = max(low_hash_cap, 0.62)
             score = min(score, low_hash_cap)
+
+        # Pattern-first soft path AFTER structural caps: garment/model full-frame
+        # vs fabric/detail must keep shared animal_print_type above burying gates.
+        if (
+            not crop_search
+            and not protected_match
+            and (
+                same_animal_print
+                or (
+                    qf_n_early == "animal_print"
+                    and dna_sim >= 0.72
+                    and _family_compatible
+                )
+            )
+        ):
+            lifted = min(0.90, max(float(score), 0.45 * float(score) + 0.55 * pattern_family_score))
+            if same_animal_print:
+                lifted = max(lifted, 0.62)
+            score = max(float(score), lifted)
+            debug["pattern_first_soft"] = True
+            debug["pattern_first_same_animal"] = bool(same_animal_print)
 
         # Renk varyantı: yapı benzer, renk farklı — farklı aileye uygulanmaz
         is_color_variant = phash_sim >= 0.75 and dhash_sim >= 0.70 and color_sim < 0.55
