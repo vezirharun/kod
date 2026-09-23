@@ -249,6 +249,12 @@ def _tiny_png(path: Path) -> None:
 
 
 def test_large_preview_opens_and_closes(tmp_path):
+    """Large preview = preferred open size; label min is responsive floor (320).
+
+    Not a teach-me regression: ImagePreviewDialog has used setMinimumSize(320,240)
+    since initial commit while opening at prefer 960×720 via apply_responsive_dialog.
+    Asserting lbl_image.minimumWidth()>=640 contradicted intentional responsive design.
+    """
     from ui.preview_dialog import ImagePreviewDialog
 
     _app()
@@ -256,7 +262,13 @@ def test_large_preview_opens_and_closes(tmp_path):
     _tiny_png(img)
     dlg = ImagePreviewDialog(str(img), title="Önizleme — p.png")
     assert "Önizleme" in dlg.windowTitle()
-    assert dlg.lbl_image.minimumWidth() >= 640
+    # Preferred / fitted window is large
+    assert dlg.width() >= 640
+    assert dlg.height() >= 480
+    # Image label keeps a modest responsive floor (not a hard 640 min)
+    assert dlg.lbl_image.minimumWidth() >= 320
+    assert dlg.lbl_image.minimumHeight() >= 240
+    assert dlg.lbl_image.minimumWidth() < 640
     dlg.close()
     assert dlg.isVisible() is False
 

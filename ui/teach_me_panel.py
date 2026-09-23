@@ -1284,57 +1284,62 @@ class TeachMePanel(QWidget):
             return
         self._apply_teach(ids, labels=[name])
 
+    def _populate_multi_teach_menu(
+        self, menu: QMenu, ids: list[int]
+    ) -> tuple[object | None, list]:
+        """10–50 seçim: ortak aday checkbox + öğret action. menu.exec çağırmaz (testable)."""
+        n = len(ids)
+        if not (10 <= n <= 50):
+            return None, []
+        cards = [c for c in (self._card_by_id(i) for i in ids) if c is not None]
+        picks = _quick_pick_candidates(cards) if len(cards) >= 10 else []
+        header = QAction(f"Seçilen {n} dosya için", menu)
+        header.setEnabled(False)
+        menu.addAction(header)
+        sub = QAction("Aday kavramlar", menu)
+        sub.setEnabled(False)
+        menu.addAction(sub)
+        menu.addSeparator()
+        cand_acts: list = []
+        for name, conf in picks:
+            act = QAction(_format_candidate_line(name, conf), menu)
+            act.setCheckable(True)
+            act.setData(name)
+            menu.addAction(act)
+            cand_acts.append(act)
+        menu.addSeparator()
+        teach_act = QAction("Seçilenleri öğret", menu)
+        teach_act.setEnabled(False)
+
+        def _update_teach_text() -> None:
+            chosen = [
+                str(a.data() or "").strip()
+                for a in cand_acts
+                if a.isChecked() and str(a.data() or "").strip()
+            ]
+            if chosen:
+                joined = " + ".join(chosen)
+                teach_act.setText(f'Seçilenleri "{joined}" olarak öğret')
+                teach_act.setEnabled(True)
+            else:
+                teach_act.setText("Seçilenleri öğret")
+                teach_act.setEnabled(False)
+
+        for a in cand_acts:
+            a.toggled.connect(lambda _c: _update_teach_text())
+        _update_teach_text()
+        menu.addAction(teach_act)
+        menu.addSeparator()
+        return teach_act, cand_acts
+
     def _on_pool_context_menu(self, pos) -> None:
         """10–50 seçim: ortak aday checkbox menü + toplu öğret (dialog yok)."""
         widget = self._active_list()
         if not self._pool_allows_quick_candidates():
             return
         ids = self.selected_ids()
-        n = len(ids)
         menu = _StickyCheckMenu(self)
-        if 10 <= n <= 50:
-            cards = [c for c in (self._card_by_id(i) for i in ids) if c is not None]
-            picks = _quick_pick_candidates(cards) if len(cards) >= 10 else []
-            header = QAction(f"Seçilen {n} dosya için", menu)
-            header.setEnabled(False)
-            menu.addAction(header)
-            sub = QAction("Aday kavramlar", menu)
-            sub.setEnabled(False)
-            menu.addAction(sub)
-            menu.addSeparator()
-            cand_acts: list[QAction] = []
-            for name, conf in picks:
-                act = QAction(_format_candidate_line(name, conf), menu)
-                act.setCheckable(True)
-                act.setData(name)
-                menu.addAction(act)
-                cand_acts.append(act)
-            menu.addSeparator()
-            teach_act = QAction("Seçilenleri öğret", menu)
-            teach_act.setEnabled(False)
-
-            def _update_teach_text() -> None:
-                chosen = [
-                    str(a.data() or "").strip()
-                    for a in cand_acts
-                    if a.isChecked() and str(a.data() or "").strip()
-                ]
-                if chosen:
-                    joined = " + ".join(chosen)
-                    teach_act.setText(f'Seçilenleri "{joined}" olarak öğret')
-                    teach_act.setEnabled(True)
-                else:
-                    teach_act.setText("Seçilenleri öğret")
-                    teach_act.setEnabled(False)
-
-            for a in cand_acts:
-                a.toggled.connect(lambda _c: _update_teach_text())
-            _update_teach_text()
-            menu.addAction(teach_act)
-            menu.addSeparator()
-        else:
-            teach_act = None
-            cand_acts = []
+        teach_act, cand_acts = self._populate_multi_teach_menu(menu, ids)
 
         preview_act = QAction("Önizleme aç", menu)
         folder_act = QAction("Klasörde göster", menu)

@@ -24,6 +24,7 @@ class ImagePreviewDialog(QDialog):
         layout.addWidget(hint)
         self.lbl_image = QLabel()
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Responsive floor (small screens); preferred dialog size is still ~960×720.
         self.lbl_image.setMinimumSize(320, 240)
         self.lbl_image.setStyleSheet("background: #1e1e1e; border: 1px solid #444;")
         layout.addWidget(self.lbl_image, 1)
