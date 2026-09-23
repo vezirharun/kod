@@ -1276,6 +1276,17 @@ class SearchEngine:
             if query.text:
                 all_scored = self._apply_hybrid_text_boost(all_scored, query.text)
                 try:
+                    from core.intent_evidence_routing import apply_intent_evidence_routing
+
+                    all_scored = apply_intent_evidence_routing(
+                        all_scored,
+                        query.text,
+                        has_image=bool(query.image_path),
+                        db_path=str(getattr(self.settings, "db_path", "") or ""),
+                    )
+                except Exception as exc:
+                    logger.debug("intent evidence routing skipped: %s", exc)
+                try:
                     from core.natural_language_query import parse_natural_query
                     parsed_query = parse_natural_query(query.text)
                     from core.brand_aliases import resolve_brand_alias, query_brand_needles
@@ -4153,6 +4164,18 @@ class SearchEngine:
                 except Exception:
                     pass
 
+        try:
+            from core.intent_evidence_routing import apply_intent_evidence_routing
+
+            results = apply_intent_evidence_routing(
+                results,
+                effective_text or text,
+                has_image=False,
+                db_path=str(getattr(self.settings, "db_path", "") or ""),
+            )
+        except Exception:
+            pass
+
         _SEM_RANK = {
             "Exact": 0,
             "Very Similar": 1,
@@ -5821,8 +5844,23 @@ class SearchEngine:
 
         # Pattern-first soft path AFTER structural caps: garment/model full-frame
         # vs fabric/detail must keep shared animal_print_type above burying gates.
+        # Intent gate: person/object-only text must not lift fabric-only leopard peers.
+        _suppress_pf = False
+        if text_query:
+            try:
+                from core.intent_evidence_routing import (
+                    build_intent_evidence_plan,
+                    should_suppress_pattern_first,
+                )
+
+                _suppress_pf = should_suppress_pattern_first(
+                    build_intent_evidence_plan(text_query)
+                )
+            except Exception:
+                _suppress_pf = False
         if (
-            not crop_search
+            not _suppress_pf
+            and not crop_search
             and not protected_match
             and (
                 same_animal_print
@@ -5839,6 +5877,8 @@ class SearchEngine:
             score = max(float(score), lifted)
             debug["pattern_first_soft"] = True
             debug["pattern_first_same_animal"] = bool(same_animal_print)
+        elif _suppress_pf and same_animal_print:
+            debug["pattern_first_suppressed_by_intent"] = True
 
         # Renk varyantı: yapı benzer, renk farklı — farklı aileye uygulanmaz
         is_color_variant = phash_sim >= 0.75 and dhash_sim >= 0.70 and color_sim < 0.55
