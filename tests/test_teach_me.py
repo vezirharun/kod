@@ -19,6 +19,7 @@ from core.teach_me import (
     assign_undecided_pool,
     competing_strong_guesses,
     list_inbox,
+    list_inbox_pools,
     match_clip_to_concepts,
     teach_files,
 )
@@ -197,6 +198,23 @@ def test_panel_multi_select_and_teach(tmp_path):
     ids = panel.selected_ids()
     assert a in ids and b in ids
     panel._apply_teach(ids, "Zincir")
+    # Async teach worker — drain until idle (offscreen Qt).
+    import time
+    from PySide6.QtWidgets import QApplication
+    from core.qthread_lifecycle import qthread_is_running
+
+    deadline = time.time() + 30
+    app = QApplication.instance()
+    while time.time() < deadline:
+        app.processEvents()
+        w = getattr(panel, "_teach_worker", None)
+        if w is None or not qthread_is_running(w):
+            app.processEvents()
+            if getattr(panel, "_teach_worker", None) is None:
+                break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("teach worker timeout")
     path = str(tmp_path / "patterns.db")
     assert any(str(r["canonical"]) == "Zincir" for r in concepts(path))
     panel.reload()
@@ -463,6 +481,89 @@ def test_assign_undecided_requires_two_strong_guesses():
     assert {n for n, _c in rivals} >= {"kedi", "elma"}
 
 
+def test_common_candidate_scores_intersection_min_conf():
+    from core.teach_me import TeachMeCard
+    from ui.teach_me_panel import _quick_pick_candidates
+
+    a = TeachMeCard(
+        file_id=1,
+        filename="a.jpg",
+        path="",
+        preview_path="",
+        pool="undecided",
+        reason="",
+        guess="a",
+        confidence=0.5,
+        rivals=[["Leopard", 0.6], ["Çiçek", 0.25], ["Elma", 0.1]],
+    )
+    b = TeachMeCard(
+        file_id=2,
+        filename="b.jpg",
+        path="",
+        preview_path="",
+        pool="undecided",
+        reason="",
+        guess="b",
+        confidence=0.5,
+        rivals=[["Leopard", 0.8], ["Çiçek", 0.4], ["Kaplan", 0.3]],
+    )
+    c = TeachMeCard(
+        file_id=3,
+        filename="c.jpg",
+        path="",
+        preview_path="",
+        pool="undecided",
+        reason="",
+        guess="c",
+        confidence=0.5,
+        rivals=[["Kaplan", 0.9]],
+    )
+    # Tekli = BU GÖRSEL NE? listesi
+    single = _quick_pick_candidates([a])
+    assert [n for n, _ in single][:3] == ["Leopard", "Çiçek", "Elma"]
+    # Çoklu = aynı kaynakların kesişimi (yeni aday yok)
+    common = _quick_pick_candidates([a, b])
+    names = {n for n, _ in common}
+    assert names == {"Leopard", "Çiçek"}
+    by = dict(common)
+    assert abs(by["Leopard"] - 0.6) < 1e-6
+    assert abs(by["Çiçek"] - 0.25) < 1e-6
+    assert _quick_pick_candidates([a, b, c]) == []
+
+
+def test_inbox_card_attaches_undecided_rivals(tmp_path):
+    db = _db(tmp_path)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO sources(name, root_path, is_active) VALUES (?,?,1)",
+            ("t", str(tmp_path)),
+        )
+    _add(
+        db,
+        tmp_path,
+        "mix.jpg",
+        pattern_family="floral",
+        pattern_confidence=0.9,
+        texture_map={
+            "pattern_family": "floral",
+            "classification_confidence": 0.9,
+            "global_object_intelligence": {
+                "objects": [
+                    {"label": "çiçek", "confidence": 0.7},
+                    {"label": "elma", "confidence": 0.55},
+                ]
+            },
+        },
+    )
+    pools = list_inbox_pools(db, str(tmp_path / "patterns.db"), limit=20)
+    undec = pools.get("undecided") or []
+    assert undec
+    card = undec[0]
+    assert card.rivals
+    assert len(card.rivals) >= 2
+    assert all(isinstance(r, list) and len(r) >= 2 for r in card.rivals)
+
+
 def test_undecided_inbox_and_teach_leaves_pool(tmp_path):
     db = _db(tmp_path)
     with db.connect() as conn:
@@ -542,7 +643,10 @@ def test_panel_undecided_tab_preview_and_teach(tmp_path):
     assert panel.list_undecided.count() >= 1
     panel.tabs.setCurrentIndex(2)
     item = panel.list_undecided.item(0)
-    assert item.icon() is not None
+    from ui.teach_me_panel import _CandidateCardWidget
+
+    cw = panel.list_undecided.itemWidget(item)
+    assert isinstance(cw, _CandidateCardWidget)
     dlg = panel._open_preview(item, exec_dialog=False)
     assert dlg is not None
     dlg.close()
@@ -558,10 +662,11 @@ def test_panel_undecided_tab_preview_and_teach(tmp_path):
 
 
 def test_smart_undecided_one_click_teaches_without_confirm(tmp_path):
-    """BU GÖRSEL NE? aday tık → confirm_reviews; onay diyaloğu yok; kart kapanır."""
+    """Kart üzeri aday checkbox + Seçilenlere öğret → dialog yok; async teach."""
     from core.autonomous_learn import upsert_review
     from core.concept_registry import positives_for_file
-    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QCheckBox
+    from ui.teach_me_panel import _CandidateCardWidget
 
     _app()
     db = _db(tmp_path)
@@ -599,37 +704,144 @@ def test_smart_undecided_one_click_teaches_without_confirm(tmp_path):
     panel.reload(blocking=True)
     panel.tabs.setCurrentIndex(2)
     assert panel.list_undecided.count() >= 1
-    panel.list_undecided.clearSelection()
+    assert panel.smart_undecided.isHidden()
     item = panel.list_undecided.item(0)
+    cw = panel.list_undecided.itemWidget(item)
+    assert isinstance(cw, _CandidateCardWidget)
+    # Normal: aday paneli gizli
+    assert not cw.cand_host.isVisible()
     item.setSelected(True)
     panel.list_undecided.setCurrentItem(item)
     panel._update_review_detail()
-    assert not panel.smart_undecided.isHidden()
-    labels = []
-    for i in range(panel.smart_candidates_row.count()):
-        w = panel.smart_candidates_row.itemAt(i).widget()
-        if isinstance(w, QPushButton):
-            labels.append(w.text())
-    assert "GÜL" in labels and "DUDAK" in labels
-    assert panel.btn_hicbiri is not None
+    assert cw.cand_host.isVisible()
+    checks = [c for c in cw._checks if isinstance(c, QCheckBox)]
+    assert checks
+    assert any("GÜL" in c.text() for c in checks)
+    for c in checks:
+        if "GÜL" in c.text():
+            c.setChecked(True)
+            break
 
     taught: list[tuple[str, int]] = []
     panel.taught.connect(lambda n, c: taught.append((n, c)))
-    panel._on_one_click_teach("GÜL")
-    # Finish deferred QTimer
-    app = _app()
-    for _ in range(80):
-        app.processEvents()
-        if taught:
-            break
-    assert taught and taught[0][0] == "GÜL"
+    panel._on_teach()
     remaining = [
         int(panel.list_undecided.item(i).data(Qt.ItemDataRole.UserRole) or 0)
         for i in range(panel.list_undecided.count())
     ]
     assert fid not in remaining
+    app = _app()
+    for _ in range(200):
+        app.processEvents()
+        if taught:
+            break
+        w = getattr(panel, "_teach_worker", None)
+        if w is not None:
+            w.wait(20)
+    assert taught and "GÜL" in taught[0][0]
     pos = positives_for_file(path, fid)
     assert any(str(p.get("canonical") or "") == "GÜL" for p in pos)
+
+
+def test_candidate_card_hover_only_expands_that_card(tmp_path):
+    from core.autonomous_learn import upsert_review
+    from ui.teach_me_panel import _CandidateCardWidget
+
+    _app()
+    db = _db(tmp_path)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO sources(name, root_path, is_active) VALUES (?,?,1)",
+            ("t", str(tmp_path)),
+        )
+    path = str(tmp_path / "patterns.db")
+    ids = []
+    for name, rivals in (
+        ("a.jpg", [["animal", 0.5], ["deer", 0.4]]),
+        ("b.jpg", [["animal", 0.6], ["bird", 0.3]]),
+    ):
+        img = tmp_path / name
+        img.write_bytes(b"x")
+        fid = int(
+            db.upsert_file(
+                {
+                    "path": str(img),
+                    "filename": name,
+                    "source_id": 1,
+                    "status": "indexed",
+                }
+            )
+        )
+        upsert_review(
+            path,
+            fid,
+            lane="suspicious",
+            suggested=rivals[0][0],
+            confidence=0.5,
+            rivals=rivals,
+            reason="t",
+        )
+        ids.append(fid)
+    settings = AppSettings()
+    settings.db_path = path
+    panel = TeachMePanel(settings)
+    panel.show()
+    panel.reload(blocking=True)
+    panel.tabs.setCurrentIndex(1)
+    assert panel.list_suspicious.count() >= 2
+    w0 = panel.list_suspicious.itemWidget(panel.list_suspicious.item(0))
+    w1 = panel.list_suspicious.itemWidget(panel.list_suspicious.item(1))
+    assert isinstance(w0, _CandidateCardWidget)
+    assert isinstance(w1, _CandidateCardWidget)
+    assert not w0.cand_host.isVisible()
+    assert not w1.cand_host.isVisible()
+    # Clean card meta: no Öneri / Güven / Neden / aday satırları
+    meta0 = w0.lbl_meta.text()
+    assert "Öneri:" not in meta0
+    assert "Güven" not in meta0
+    assert "deer %" not in meta0
+    assert meta0.strip().startswith("a.jpg") or "a.jpg" in meta0.split("\n")[0]
+    panel._on_card_widget_hover(w0, True)
+    assert w0.cand_host.isVisible()
+    assert not w1.cand_host.isVisible()
+    panel._on_card_widget_hover(w0, False)
+    panel._on_card_widget_hover(w1, True)
+    assert not w0.cand_host.isVisible()
+    assert w1.cand_host.isVisible()
+    # Select both → both expanded
+    panel.list_suspicious.selectAll()
+    panel._update_review_detail()
+    assert w0.cand_host.isVisible() and w1.cand_host.isVisible()
+    # Bottom review must NOT dump global candidate panel fields
+    review = panel.lbl_review.text()
+    assert "Önerilen kavram" not in review
+    assert "Alternatifler:" not in review
+    assert "Neden:" not in review
+    assert panel.smart_undecided.isHidden()
+
+
+def test_suspicious_card_list_text_is_clean():
+    from core.teach_me import TeachMeCard
+    from ui.teach_me_panel import _card_list_text
+
+    card = TeachMeCard(
+        file_id=1,
+        filename="x.png",
+        path="/x.png",
+        preview_path="",
+        pool="suspicious",
+        reason="Çelişen kavram: A vs B",
+        guess="animal",
+        suggested="animal",
+        confidence=0.52,
+        rivals=[["animal", 0.52], ["deer", 0.38]],
+    )
+    text = _card_list_text(card, show_candidates=False)
+    assert text.strip() == "x.png"
+    assert "Öneri" not in text
+    assert "Güven" not in text
+    assert "Çelişen" not in text
+    assert "animal" not in text
 
 
 def test_keep_host_visible_restores_hidden_dock(tmp_path):

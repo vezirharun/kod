@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QRect, QThread, QTimer, Signal
-from PySide6.QtGui import QFontMetrics, QIcon, QImage, QImageReader, QPixmap
+from PySide6.QtCore import QEvent, QObject, Qt, QSize, QRect, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QFontMetrics, QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QHBoxLayout,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -106,7 +108,302 @@ class _TeachMeInboxWorker(QThread):
             self.failed.emit(self._req_id, str(exc))
 
 
-def _card_list_text(card: TeachMeCard) -> str:
+class _TeachMeTeachWorker(QThread):
+    """teach_files — UI thread dışında (CLIP/learn/writes)."""
+
+    finished_ok = Signal(str, object)  # label, stats
+    failed = Signal(str, str)  # label, message
+
+    def __init__(
+        self,
+        db_path: str,
+        file_ids: list[int],
+        label: str = "",
+        overlay: dict | None = None,
+        parent=None,
+        labels: list[str] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._db_path = str(db_path)
+        self._file_ids = [int(i) for i in (file_ids or []) if int(i) > 0]
+        labs: list[str] = []
+        for raw in list(labels or []) + ([label] if label else []):
+            name = " ".join(str(raw or "").strip().split())
+            if name and name.casefold() not in {x.casefold() for x in labs}:
+                labs.append(name)
+        self._labels = labs
+        self._label = " + ".join(labs)
+        self._overlay = overlay
+
+    def run(self) -> None:
+        try:
+            if not self._labels:
+                self.failed.emit("", "Öğretilecek kavram yok.")
+                return
+            db = Database(self._db_path)
+            taught_total = 0
+            last_stats: dict = {}
+            for i, name in enumerate(self._labels):
+                stats = teach_files(
+                    db,
+                    self._db_path,
+                    self._file_ids,
+                    name,
+                    overlay=self._overlay if i == 0 else None,
+                )
+                last_stats = stats if isinstance(stats, dict) else {}
+                taught_total += int(last_stats.get("taught") or 0)
+            if taught_total <= 0:
+                self.failed.emit(self._label, "Öğretilemedi (0 dosya).")
+            else:
+                try:
+                    from core.autonomous_learn import _set_review_status
+
+                    _set_review_status(self._db_path, self._file_ids, "accepted")
+                except Exception:
+                    pass
+                out = dict(last_stats)
+                out["taught"] = taught_total
+                self.finished_ok.emit(self._label, out)
+        except Exception as exc:
+            logger.exception("TeachMe teach worker failed")
+            self.failed.emit(self._label, str(exc))
+
+
+class _StickyCheckMenu(QMenu):
+    """Checkable aday satırlarında menüyü kapatma."""
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        act = self.actionAt(event.pos()) if event is not None else None
+        if act is not None and act.isCheckable() and act.isEnabled():
+            act.toggle()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class _CandidateCardWidget(QWidget):
+    """Şüpheli/Kararsız kartı — adaylar yalnızca hover/seçili iken kart üzerinde."""
+
+    def __init__(
+        self,
+        card: TeachMeCard,
+        panel: "TeachMePanel",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.file_id = int(card.file_id or 0)
+        self._card = card
+        self._panel = panel
+        self._checks: list[QCheckBox] = []
+        self.setObjectName("teachCandidateCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
+        self.lbl_thumb = QLabel()
+        self.lbl_thumb.setFixedSize(_THUMB_EDGE, _THUMB_EDGE)
+        self.lbl_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_thumb.setStyleSheet("background:#2a2a2a;")
+        lay.addWidget(self.lbl_thumb, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_meta = QLabel(_card_list_text(card, show_candidates=False))
+        self.lbl_meta.setWordWrap(True)
+        self.lbl_meta.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.lbl_meta.setFixedWidth(_CARD_TEXT_WIDTH)
+        lay.addWidget(self.lbl_meta)
+        self.cand_host = QWidget()
+        self.cand_lay = QVBoxLayout(self.cand_host)
+        self.cand_lay.setContentsMargins(0, 2, 0, 0)
+        self.cand_lay.setSpacing(1)
+        for name, conf in _candidate_pairs(card)[:5]:
+            cb = QCheckBox(_format_candidate_line(name, conf))
+            cb.setProperty("candidate_name", name)
+            cb.setStyleSheet("QCheckBox{font-size:11px;}")
+            self.cand_lay.addWidget(cb)
+            self._checks.append(cb)
+        self.cand_host.hide()
+        lay.addWidget(self.cand_host)
+        self.setFixedWidth(_CARD_TEXT_WIDTH + _CARD_H_PAD)
+        self._apply_size()
+
+    def set_thumb(self, pix: QPixmap) -> None:
+        if pix is None or pix.isNull():
+            self.lbl_thumb.setPixmap(QPixmap())
+            return
+        self.lbl_thumb.setPixmap(
+            pix.scaled(
+                _THUMB_EDGE,
+                _THUMB_EDGE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def set_candidates_visible(self, visible: bool) -> None:
+        want = bool(visible) and bool(self._checks)
+        if self.cand_host.isVisible() == want:
+            return
+        self.cand_host.setVisible(want)
+        self._apply_size()
+        panel = self._panel
+        if panel is not None:
+            panel._notify_card_size_changed(self)
+
+    def checked_labels(self) -> list[str]:
+        out: list[str] = []
+        for cb in self._checks:
+            try:
+                if cb.isChecked():
+                    name = " ".join(
+                        str(cb.property("candidate_name") or "").strip().split()
+                    )
+                    if name:
+                        out.append(name)
+            except RuntimeError:
+                continue
+        return out
+
+    def _apply_size(self) -> None:
+        self.adjustSize()
+        hint = self.sizeHint()
+        self.setMinimumHeight(hint.height())
+        self.setMaximumWidth(_CARD_TEXT_WIDTH + _CARD_H_PAD)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        if self._panel is not None:
+            self._panel._on_card_widget_hover(self, True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._panel is not None:
+            self._panel._on_card_widget_hover(self, False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._panel is not None:
+            self._panel._focus_card_widget(self, event)
+        super().mousePressEvent(event)
+
+
+class _ListHoverFilter(QObject):
+    """Unused placeholder kept for import stability — hover is on card widgets."""
+
+    def __init__(self, panel: "TeachMePanel", list_widget: QListWidget) -> None:
+        super().__init__(list_widget)
+        self._panel = panel
+        self._list = list_widget
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        return False
+
+
+def _card_member_ids(card: TeachMeCard | None) -> set[int]:
+    """Primary file_id plus visual-family member_ids."""
+    if card is None:
+        return set()
+    out: set[int] = set()
+    try:
+        fid = int(getattr(card, "file_id", 0) or 0)
+    except (TypeError, ValueError):
+        fid = 0
+    if fid > 0:
+        out.add(fid)
+    for mid in getattr(card, "member_ids", None) or []:
+        try:
+            m = int(mid)
+        except (TypeError, ValueError):
+            continue
+        if m > 0:
+            out.add(m)
+    return out
+
+
+def _candidate_pairs(card: TeachMeCard | None) -> list[tuple[str, float]]:
+    """Mevcut rivals / suggested — yeni skor yok."""
+    if card is None:
+        return []
+    labels = undecided_candidate_labels(
+        getattr(card, "rivals", None),
+        str(getattr(card, "suggested", "") or ""),
+    )
+    if not labels:
+        labels = undecided_candidate_labels(
+            None,
+            str(getattr(card, "guess", "") or ""),
+        )
+    conf_by: dict[str, float] = {}
+    for item in getattr(card, "rivals", None) or []:
+        if isinstance(item, (list, tuple)) and item:
+            lab = " ".join(str(item[0] or "").strip().split())
+            if not lab:
+                continue
+            try:
+                c = float(item[1]) if len(item) > 1 else 0.0
+            except (TypeError, ValueError):
+                c = 0.0
+            conf_by[lab.casefold()] = min(1.0, max(0.0, c))
+    out: list[tuple[str, float]] = []
+    for lab in labels:
+        c = conf_by.get(lab.casefold())
+        if c is None:
+            try:
+                c = float(getattr(card, "confidence", 0) or 0)
+            except (TypeError, ValueError):
+                c = 0.0
+        out.append((lab, float(c)))
+    return out
+
+
+def _quick_pick_candidates(
+    cards: list[TeachMeCard],
+) -> list[tuple[str, float]]:
+    """Tekli = kart adayları; çoklu = aynı listelerin kesişimi."""
+    if not cards:
+        return []
+    lists = [_candidate_pairs(c) for c in cards]
+    if any(not pairs for pairs in lists):
+        return []
+    if len(lists) == 1:
+        return lists[0]
+    keysets = [{name.casefold() for name, _c in pairs} for pairs in lists]
+    common = keysets[0].intersection(*keysets[1:])
+    if not common:
+        return []
+    conf_min: dict[str, float] = {}
+    for pairs in lists:
+        for name, conf in pairs:
+            key = name.casefold()
+            if key not in common:
+                continue
+            prev = conf_min.get(key)
+            conf_min[key] = float(conf) if prev is None else min(prev, float(conf))
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for name, _c in lists[0]:
+        key = name.casefold()
+        if key not in common or key in seen:
+            continue
+        seen.add(key)
+        out.append((name, conf_min.get(key, 0.0)))
+    return out
+
+
+def _format_candidate_line(name: str, conf: float) -> str:
+    pct = int(round(float(conf or 0) * 100))
+    return f"{name} %{pct}"
+
+
+def _card_list_text(card: TeachMeCard, *, show_candidates: bool = False) -> str:
+    pool = str(getattr(card, "pool", "") or "")
+    # Şüpheli/Kararsız: temiz kart — öneri/güven/neden/aday metni yok
+    # (adaylar yalnızca hover/seçili checkbox satırlarında).
+    if pool in ("suspicious", "undecided"):
+        lines = [str(card.filename or "")]
+        if int(getattr(card, "cluster_size", 1) or 1) > 1:
+            lines.append(f"{int(card.cluster_size)} görsel")
+        if show_candidates:
+            for name, conf in _candidate_pairs(card)[:5]:
+                lines.append(_format_candidate_line(name, conf))
+        return "\n".join(lines)
     conf_pct = int(round(float(card.confidence or 0) * 100))
     extra = ""
     if int(getattr(card, "cluster_size", 1) or 1) > 1:
@@ -114,11 +411,12 @@ def _card_list_text(card: TeachMeCard) -> str:
     reason = " ".join(str(card.reason or "").split())
     if len(reason) > _REASON_MAX_CHARS:
         reason = reason[: _REASON_MAX_CHARS - 1].rstrip() + "…"
-    return (
-        f"{card.filename}\n"
-        f"Öneri: {card.guess} · Güven %{conf_pct}{extra}\n"
-        f"{reason}"
-    )
+    lines = [
+        f"{card.filename}",
+        f"Öneri: {card.guess} · Güven %{conf_pct}{extra}",
+        f"{reason}",
+    ]
+    return "\n".join(lines)
 
 
 def _card_item_size_hint(text: str, *, thumb_edge: int = _THUMB_EDGE) -> QSize:
@@ -204,6 +502,11 @@ class TeachMePanel(QWidget):
         self._reload_req = 0
         self._fill_gen = 0
         self._inbox_worker: _TeachMeInboxWorker | None = None
+        self._teach_worker: _TeachMeTeachWorker | None = None
+        self._pending_taught_ids: set[int] = set()
+        self._optimistic_removed: list[tuple[str, TeachMeCard]] = []
+        self._hover_fid: int = 0
+        self._candidate_checks: list[QCheckBox] = []
         self._concept_names: list[str] = []
         self._thumb_scheduler: ThumbnailScheduler | None = None
         self._thumb_wait_gen: dict[int, int] = {}
@@ -247,44 +550,29 @@ class TeachMePanel(QWidget):
         self.list_suspicious = self._make_list()
         self.list_undecided = self._make_list()
         self.list_new_concept = self._make_list()
+        for _lw in (self.list_suspicious, self.list_undecided):
+            _lw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            _lw.customContextMenuRequested.connect(self._on_pool_context_menu)
         self.tabs.addTab(self.list_undefined, "Tanımsızlar")
         self.tabs.addTab(self.list_suspicious, "Şüpheliler")
         self.tabs.addTab(self.list_undecided, "Kararsızlar")
         self.tabs.addTab(self.list_new_concept, "Yeni Kavram")
         layout.addWidget(self.tabs, 1)
 
-        self.lbl_review = QLabel("Bir görsel seçin — öneri, güven ve gerekçe burada.")
+        self.lbl_review = QLabel("Bir görsel seçin.")
         self.lbl_review.setWordWrap(True)
         layout.addWidget(self.lbl_review)
 
-        # AKILLI KARARSIZLAR — one-click öğret (mevcut Teach önünde karar katmanı)
+        # Eski global "Aday kavramlar" paneli — gizli (adaylar kart üzerinde).
         self.smart_undecided = QWidget()
-        smart_lay = QVBoxLayout(self.smart_undecided)
-        smart_lay.setContentsMargins(0, 4, 0, 4)
-        smart_lay.setSpacing(6)
-        self.lbl_smart_title = QLabel("BU GÖRSEL NE?")
-        title_font = self.lbl_smart_title.font()
-        title_font.setBold(True)
-        self.lbl_smart_title.setFont(title_font)
-        smart_lay.addWidget(self.lbl_smart_title)
-        smart_mid = QHBoxLayout()
-        self.lbl_smart_thumb = QLabel()
-        self.lbl_smart_thumb.setFixedSize(72, 72)
-        self.lbl_smart_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_smart_thumb.setStyleSheet("background:#2a2a2a;")
-        smart_mid.addWidget(self.lbl_smart_thumb)
-        self.smart_candidates_host = QWidget()
-        self.smart_candidates_row = QHBoxLayout(self.smart_candidates_host)
-        self.smart_candidates_row.setContentsMargins(0, 0, 0, 0)
-        self.smart_candidates_row.setSpacing(6)
-        smart_mid.addWidget(self.smart_candidates_host, 1)
-        smart_lay.addLayout(smart_mid)
-        self.btn_hicbiri = QPushButton("Hiçbiri")
-        self.btn_hicbiri.setToolTip("Aday yok / yanlış — mevcut öğret diyaloğunu aç")
-        self.btn_hicbiri.clicked.connect(self._on_hicbiri)
-        smart_lay.addWidget(self.btn_hicbiri)
         self.smart_undecided.hide()
-        layout.addWidget(self.smart_undecided)
+        self.lbl_smart_title = QLabel("")
+        self.lbl_smart_thumb = QLabel()
+        self.smart_candidates_host = QWidget()
+        self.smart_candidates_row = QVBoxLayout(self.smart_candidates_host)
+        self.btn_hicbiri = QPushButton("Hiçbiri")
+        self.btn_hicbiri.hide()
+        self.btn_hicbiri.clicked.connect(self._on_hicbiri)
 
         btns = QHBoxLayout()
         self.btn_select_all = QPushButton("Tümünü seç")
@@ -337,6 +625,7 @@ class TeachMePanel(QWidget):
         w.setUniformItemSizes(False)
         w.setMovement(QListWidget.Movement.Static)
         w.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        w.setMouseTracking(True)
         w.itemClicked.connect(self._on_item_clicked)
         w.itemDoubleClicked.connect(self._on_item_preview)
         w.itemSelectionChanged.connect(self._update_review_detail)
@@ -344,6 +633,129 @@ class TeachMePanel(QWidget):
             lambda _v: self._schedule_active_viewport_thumbs()
         )
         return w
+
+    def _uses_candidate_cards(self, widget: QListWidget) -> bool:
+        return widget in (
+            getattr(self, "list_suspicious", None),
+            getattr(self, "list_undecided", None),
+        )
+
+    def _add_pool_card_item(
+        self,
+        widget: QListWidget,
+        card: TeachMeCard,
+        *,
+        gen: int,
+        with_icon: bool,
+    ) -> QListWidgetItem:
+        """Şüpheli/Kararsız → kart widget; diğer havuzlar → klasik item."""
+        cache_dir = str(getattr(self.settings, "cache_dir", "") or "")
+        tip = f"{card.path}\n{card.category}\n{card.reason}"
+        if self._uses_candidate_cards(widget):
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, int(card.file_id))
+            item.setToolTip(tip)
+            cw = _CandidateCardWidget(card, self)
+            if with_icon:
+                path = _thumb_path(card, cache_dir=cache_dir, db=None)
+                cw.set_thumb(_preview_pix(path))
+                if not path:
+                    self._request_thumb_miss(card, gen)
+            item.setSizeHint(cw.sizeHint())
+            widget.addItem(item)
+            widget.setItemWidget(item, cw)
+            return item
+        text = _card_list_text(card, show_candidates=False)
+        item = QListWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, int(card.file_id))
+        item.setToolTip(tip)
+        item.setTextAlignment(
+            int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        )
+        item.setSizeHint(_card_item_size_hint(text))
+        if with_icon:
+            path = _thumb_path(card, cache_dir=cache_dir, db=None)
+            item.setIcon(QIcon(_preview_pix(path)))
+            if not path:
+                self._request_thumb_miss(card, gen)
+        widget.addItem(item)
+        return item
+
+    def _iter_candidate_card_widgets(
+        self, widget: QListWidget | None = None
+    ) -> list[_CandidateCardWidget]:
+        lw = widget or self._active_list()
+        out: list[_CandidateCardWidget] = []
+        if not self._uses_candidate_cards(lw):
+            return out
+        for i in range(lw.count()):
+            item = lw.item(i)
+            if item is None:
+                continue
+            w = lw.itemWidget(item)
+            if isinstance(w, _CandidateCardWidget):
+                out.append(w)
+        return out
+
+    def _card_widget_by_id(self, file_id: int) -> _CandidateCardWidget | None:
+        fid = int(file_id or 0)
+        for w in self._iter_candidate_card_widgets():
+            if int(w.file_id) == fid:
+                return w
+        return None
+
+    def _notify_card_size_changed(self, card_w: _CandidateCardWidget) -> None:
+        lw = self._active_list()
+        for i in range(lw.count()):
+            item = lw.item(i)
+            if item is None:
+                continue
+            if lw.itemWidget(item) is card_w:
+                item.setSizeHint(card_w.sizeHint())
+                lw.doItemsLayout()
+                break
+
+    def _focus_card_widget(self, card_w: _CandidateCardWidget, event) -> None:
+        """Kart tıklanınca liste seçimini senkronla (Ctrl ile çoklu korunur)."""
+        lw = self._active_list()
+        target = None
+        for i in range(lw.count()):
+            item = lw.item(i)
+            if item is not None and lw.itemWidget(item) is card_w:
+                target = item
+                break
+        if target is None:
+            return
+        mods = event.modifiers() if event is not None else Qt.KeyboardModifier.NoModifier
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            target.setSelected(not target.isSelected())
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            lw.setCurrentItem(target)
+            target.setSelected(True)
+        else:
+            lw.clearSelection()
+            lw.setCurrentItem(target)
+            target.setSelected(True)
+
+    def _on_card_widget_hover(
+        self, card_w: _CandidateCardWidget, entered: bool
+    ) -> None:
+        if not self._pool_allows_quick_candidates():
+            return
+        if entered:
+            self._hover_fid = int(card_w.file_id or 0)
+        elif int(getattr(self, "_hover_fid", 0) or 0) == int(card_w.file_id or 0):
+            self._hover_fid = 0
+        self._sync_card_candidate_visibility()
+
+    def _sync_card_candidate_visibility(self) -> None:
+        if not self._pool_allows_quick_candidates():
+            return
+        selected = set(self.selected_ids())
+        hover = int(getattr(self, "_hover_fid", 0) or 0)
+        for cw in self._iter_candidate_card_widgets():
+            show = int(cw.file_id) in selected or int(cw.file_id) == hover
+            cw.set_candidates_visible(show)
 
     def _on_tab_changed(self, _i: int = 0) -> None:
         self._update_review_detail()
@@ -493,20 +905,31 @@ class TeachMePanel(QWidget):
         if int(req_id) != self._reload_req:
             return
         self._db = Database(self.settings.db_path)
+        pending = set(self._pending_taught_ids)
+
+        def _not_pending(cards: list[TeachMeCard]) -> list[TeachMeCard]:
+            out: list[TeachMeCard] = []
+            for card in cards or []:
+                if _card_member_ids(card) & pending:
+                    continue
+                out.append(card)
+            return out
+
         self._cards = {
-            "undefined": list(pools.get("undefined") or []),
-            "suspicious": list(pools.get("suspicious") or []),
-            "undecided": list(pools.get("undecided") or []),
-            "new_concept": list(pools.get("new_concept") or []),
+            "undefined": _not_pending(list(pools.get("undefined") or [])),
+            "suspicious": _not_pending(list(pools.get("suspicious") or [])),
+            "undecided": _not_pending(list(pools.get("undecided") or [])),
+            "new_concept": _not_pending(list(pools.get("new_concept") or [])),
         }
+        from core.qthread_lifecycle import qthread_is_running
+
+        if not qthread_is_running(getattr(self, "_teach_worker", None)):
+            self._pending_taught_ids.clear()
         self._fill_gen += 1
         gen = self._fill_gen
         self._thumb_wait_gen.clear()
         self._set_concept_names(concept_names)
-        self.tabs.setTabText(0, f"Tanımsızlar ({len(self._cards['undefined'])})")
-        self.tabs.setTabText(1, f"Şüpheliler ({len(self._cards['suspicious'])})")
-        self.tabs.setTabText(2, f"Kararsızlar ({len(self._cards['undecided'])})")
-        self.tabs.setTabText(3, f"Yeni Kavram ({len(self._cards['new_concept'])})")
+        self._refresh_tab_counts()
         for w in (
             self.list_undefined,
             self.list_suspicious,
@@ -537,24 +960,11 @@ class TeachMePanel(QWidget):
         """Test / küçük sync yol — tek seferde kart + ikon."""
         if gen != self._fill_gen:
             return
-        cache_dir = str(getattr(self.settings, "cache_dir", "") or "")
         for card in cards:
-            text = _card_list_text(card)
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, int(card.file_id))
-            item.setToolTip(
-                f"{card.path}\n{card.category}\n{card.reason}"
-            )
-            item.setTextAlignment(
-                int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-            )
-            item.setSizeHint(_card_item_size_hint(text))
-            path = _thumb_path(card, cache_dir=cache_dir, db=None)
-            item.setIcon(QIcon(_preview_pix(path)))
-            widget.addItem(item)
-            if not path:
-                self._request_thumb_miss(card, gen)
+            self._add_pool_card_item(widget, card, gen=gen, with_icon=True)
         widget.doItemsLayout()
+        if self._uses_candidate_cards(widget):
+            self._sync_card_candidate_visibility()
 
     def _set_concept_names(self, names: list[str]) -> None:
         self._concept_names = sorted_turkish(names or [])
@@ -604,20 +1014,9 @@ class TeachMePanel(QWidget):
             return
         end = min(int(start) + _CARD_BATCH, len(cards))
         for i in range(int(start), end):
-            card = cards[i]
-            text = _card_list_text(card)
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, int(card.file_id))
-            item.setToolTip(
-                f"{card.path}\n"
-                f"{card.category}\n"
-                f"{card.reason}"
+            self._add_pool_card_item(
+                widget, cards[i], gen=gen, with_icon=False
             )
-            item.setTextAlignment(
-                int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-            )
-            item.setSizeHint(_card_item_size_hint(text))
-            widget.addItem(item)
         if end < len(cards):
             QTimer.singleShot(
                 0, lambda: self._fill_list(widget, cards, gen, end)
@@ -642,10 +1041,16 @@ class TeachMePanel(QWidget):
                 continue
             card = cards[i]
             path = _thumb_path(card, cache_dir=cache_dir, db=None)
-            item.setIcon(QIcon(_preview_pix(path)))
-            item.setSizeHint(
-                _card_item_size_hint(item.text() or _card_list_text(card))
-            )
+            pix = _preview_pix(path)
+            cw = widget.itemWidget(item)
+            if isinstance(cw, _CandidateCardWidget):
+                cw.set_thumb(pix)
+                item.setSizeHint(cw.sizeHint())
+            else:
+                item.setIcon(QIcon(pix))
+                item.setSizeHint(
+                    _card_item_size_hint(item.text() or _card_list_text(card))
+                )
             if not path:
                 self._request_thumb_miss(card, gen)
         if end < len(cards):
@@ -654,6 +1059,8 @@ class TeachMePanel(QWidget):
             )
         else:
             widget.doItemsLayout()
+            if self._uses_candidate_cards(widget):
+                self._sync_card_candidate_visibility()
 
     def _request_thumb_miss(self, card: TeachMeCard, gen: int) -> None:
         """Miss → batched request_visible for active-tab viewport (async, dedupe)."""
@@ -693,10 +1100,15 @@ class TeachMePanel(QWidget):
                     continue
                 if int(item.data(Qt.ItemDataRole.UserRole) or 0) != fid:
                     continue
-                item.setIcon(icon)
-                item.setSizeHint(
-                    _card_item_size_hint(item.text() or "")
-                )
+                cw = widget.itemWidget(item)
+                if isinstance(cw, _CandidateCardWidget):
+                    cw.set_thumb(scaled)
+                    item.setSizeHint(cw.sizeHint())
+                else:
+                    item.setIcon(icon)
+                    item.setSizeHint(
+                        _card_item_size_hint(item.text() or "")
+                    )
 
 
     def selected_ids(self) -> list[int]:
@@ -773,103 +1185,83 @@ class TeachMePanel(QWidget):
         ids = self.selected_ids()
         if not hasattr(self, "lbl_review"):
             return
+        # Şüpheli/Kararsız: alt global aday paneli yok — sadece seçim durumu.
+        if self._pool_allows_quick_candidates():
+            self.smart_undecided.hide()
+            if not ids:
+                self.lbl_review.setText(
+                    "Kartın üzerine gelince adaylar açılır. "
+                    "Seçip checkbox işaretleyin → Seçilenlere öğret."
+                )
+            elif len(ids) == 1:
+                card = self._card_by_id(ids[0])
+                name = str(getattr(card, "filename", "") or ids[0]) if card else str(ids[0])
+                self.lbl_review.setText(f"Seçili: {name}")
+            else:
+                self.lbl_review.setText(
+                    f"{len(ids)} görsel seçildi. "
+                    "Kart üzerindeki adayları işaretleyin veya sağ tık → Seçilenleri öğret."
+                )
+            self._sync_card_candidate_visibility()
+            return
         if not ids:
-            self.lbl_review.setText("Bir görsel seçin — öneri, güven ve gerekçe burada.")
-            self._refresh_smart_undecided(None)
+            self.lbl_review.setText("Bir görsel seçin.")
+            self.smart_undecided.hide()
+            self._sync_card_candidate_visibility()
             return
         cards = [self._card_by_id(i) for i in ids]
         cards = [c for c in cards if c is not None]
         if not cards:
             self.lbl_review.setText(f"{len(ids)} görsel seçildi.")
-            self._refresh_smart_undecided(None)
+            self.smart_undecided.hide()
+            self._sync_card_candidate_visibility()
             return
         card = cards[0]
         conf_pct = int(round(float(card.confidence or 0) * 100))
-        rivals = getattr(card, "rivals", None) or []
-        rival_txt = ""
-        if rivals:
-            bits = []
-            for item in rivals[:4]:
-                if isinstance(item, (list, tuple)) and item:
-                    lab = item[0]
-                    sc = item[1] if len(item) > 1 else 0
-                    bits.append(f"{lab} %{int(round(float(sc) * 100))}")
-            rival_txt = " · ".join(bits)
         expanded = self._expanded_selected_ids()
         n = max(len(expanded), int(getattr(card, "cluster_size", 1) or 1))
         family_note = ""
         if int(getattr(card, "cluster_size", 1) or 1) > 1:
             family_note = (
-                f"\nAile adayı: aynı aile mi? Öğret/Doğru → {n} dosya birlikte; "
-                "Yanlış → grup bölünür."
+                f"\nAile: Öğret/Doğru → {n} dosya birlikte; Yanlış → grup bölünür."
             )
+        # Tanımsızlar / Yeni Kavram: hafif özet (Şüpheli/Kararsız global paneli değil)
         self.lbl_review.setText(
-            f"Önerilen kavram: {card.suggested or card.guess}\n"
-            f"Güven: %{conf_pct}"
-            + (f" · Alternatifler: {rival_txt}" if rival_txt else "")
-            + f"\nGörsel sayısı: {n}\n"
-            f"Neden: {card.reason}"
+            f"Seçili: {card.filename}\n"
+            f"Öneri: {card.suggested or card.guess} · Güven %{conf_pct}\n"
+            f"Görsel sayısı: {n}"
             + family_note
         )
-        # Smart undecided: tek seçim + Kararsızlar sekmesi
-        show_card = card if (
-            self._pool_key() == "undecided" and len(ids) == 1
-        ) else None
-        self._refresh_smart_undecided(show_card)
+        self.smart_undecided.hide()
+        self._sync_card_candidate_visibility()
+
+    def _pool_allows_quick_candidates(self) -> bool:
+        return self._pool_key() in ("suspicious", "undecided")
 
     def _clear_smart_candidate_buttons(self) -> None:
-        row = getattr(self, "smart_candidates_row", None)
-        if row is None:
-            return
-        while row.count():
-            item = row.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        self._candidate_checks = []
+
+    def _checked_candidate_labels(self) -> list[str]:
+        """Seçili kartlardaki işaretli adayları topla (kart widget checkbox)."""
+        out: list[str] = []
+        seen: set[str] = set()
+        selected = set(self.selected_ids())
+        for cw in self._iter_candidate_card_widgets():
+            if int(cw.file_id) not in selected:
+                continue
+            for name in cw.checked_labels():
+                key = name.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(name)
+        return out
 
     def _refresh_smart_undecided(self, card: TeachMeCard | None) -> None:
-        """Kararsızlar: BU GÖRSEL NE? + aday butonları + Hiçbiri."""
+        """Eski global panel — kapatıldı; no-op."""
         box = getattr(self, "smart_undecided", None)
-        if box is None:
-            return
-        self._clear_smart_candidate_buttons()
-        if card is None or self._pool_key() != "undecided":
+        if box is not None:
             box.hide()
-            return
-        labels = undecided_candidate_labels(
-            getattr(card, "rivals", None),
-            str(getattr(card, "suggested", "") or ""),
-        )
-        # Thumb
-        thumb = getattr(self, "lbl_smart_thumb", None)
-        if thumb is not None:
-            path = ""
-            cache = str(getattr(self.settings, "cache_dir", "") or "")
-            try:
-                path = _thumb_path(card, cache_dir=cache)
-            except Exception:
-                path = ""
-            if path:
-                pix = _preview_pix(path)
-                thumb.setPixmap(
-                    pix.scaled(
-                        72,
-                        72,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-            else:
-                thumb.setPixmap(QPixmap())
-        for lab in labels:
-            btn = QPushButton(lab)
-            btn.setToolTip(f"Tek tıkla öğret: {lab} (onay yok)")
-            btn.clicked.connect(
-                lambda _checked=False, name=lab: self._on_one_click_teach(name)
-            )
-            self.smart_candidates_row.addWidget(btn)
-        self.smart_candidates_row.addStretch(1)
-        box.show()
 
     def _select_first_undecided(self) -> None:
         w = self.list_undecided
@@ -883,40 +1275,101 @@ class TeachMePanel(QWidget):
             item.setSelected(True)
 
     def _on_one_click_teach(self, label: str) -> None:
-        """Aday tık → anında mevcut Teach/Learning (confirm_reviews). Onay diyaloğu yok."""
+        """Geriye uyum: tek kavram → dialog’suz teach."""
         name = " ".join(str(label or "").strip().split())
         if not name:
             return
         ids = self._expanded_selected_ids()
         if not ids:
             return
-        # Anlık UI geri bildirimi; öğrenme bir tur sonra (paint sonrası)
-        self.lbl_review.setText(f"Öğretiliyor: {name}…")
-        self._clear_smart_candidate_buttons()
-        if hasattr(self, "smart_undecided"):
-            self.smart_undecided.setEnabled(False)
-        self._set_busy(True)
+        self._apply_teach(ids, labels=[name])
 
-        def _finish() -> None:
-            try:
-                db = Database(self.settings.db_path)
-                stats = confirm_reviews(
-                    db, str(self.settings.db_path), ids, label=name
-                )
-            except Exception:
-                logger.exception("one-click teach failed")
-                stats = {"taught": 0}
-            finally:
-                self._set_busy(False)
-                if hasattr(self, "smart_undecided"):
-                    self.smart_undecided.setEnabled(True)
-            self.taught.emit(name, int(stats.get("taught") or 0))
-            self._keep_host_visible()
-            # Kararsız kartını hemen kapat; sonraki öğeye geç (async reload gecikmesin)
-            self.reload(blocking=True)
-            self._select_first_undecided()
+    def _on_pool_context_menu(self, pos) -> None:
+        """10–50 seçim: ortak aday checkbox menü + toplu öğret (dialog yok)."""
+        widget = self._active_list()
+        if not self._pool_allows_quick_candidates():
+            return
+        ids = self.selected_ids()
+        n = len(ids)
+        menu = _StickyCheckMenu(self)
+        if 10 <= n <= 50:
+            cards = [c for c in (self._card_by_id(i) for i in ids) if c is not None]
+            picks = _quick_pick_candidates(cards) if len(cards) >= 10 else []
+            header = QAction(f"Seçilen {n} dosya için", menu)
+            header.setEnabled(False)
+            menu.addAction(header)
+            sub = QAction("Aday kavramlar", menu)
+            sub.setEnabled(False)
+            menu.addAction(sub)
+            menu.addSeparator()
+            cand_acts: list[QAction] = []
+            for name, conf in picks:
+                act = QAction(_format_candidate_line(name, conf), menu)
+                act.setCheckable(True)
+                act.setData(name)
+                menu.addAction(act)
+                cand_acts.append(act)
+            menu.addSeparator()
+            teach_act = QAction("Seçilenleri öğret", menu)
+            teach_act.setEnabled(False)
 
-        QTimer.singleShot(0, _finish)
+            def _update_teach_text() -> None:
+                chosen = [
+                    str(a.data() or "").strip()
+                    for a in cand_acts
+                    if a.isChecked() and str(a.data() or "").strip()
+                ]
+                if chosen:
+                    joined = " + ".join(chosen)
+                    teach_act.setText(f'Seçilenleri "{joined}" olarak öğret')
+                    teach_act.setEnabled(True)
+                else:
+                    teach_act.setText("Seçilenleri öğret")
+                    teach_act.setEnabled(False)
+
+            for a in cand_acts:
+                a.toggled.connect(lambda _c: _update_teach_text())
+            _update_teach_text()
+            menu.addAction(teach_act)
+            menu.addSeparator()
+        else:
+            teach_act = None
+            cand_acts = []
+
+        preview_act = QAction("Önizleme aç", menu)
+        folder_act = QAction("Klasörde göster", menu)
+        clear_act = QAction("Seçimi temizle", menu)
+        menu.addAction(preview_act)
+        menu.addAction(folder_act)
+        menu.addAction(clear_act)
+
+        chosen = menu.exec(widget.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if teach_act is not None and chosen is teach_act:
+            labels = [
+                str(a.data() or "").strip()
+                for a in cand_acts
+                if a.isChecked() and str(a.data() or "").strip()
+            ]
+            if labels:
+                expand = self._expanded_selected_ids()
+                self._apply_teach(expand or ids, labels=labels)
+            return
+        if chosen is preview_act:
+            item = widget.currentItem() or (widget.selectedItems() or [None])[0]
+            if item is not None:
+                self._open_preview(item, exec_dialog=True)
+            return
+        if chosen is folder_act:
+            card = self._card_by_id((ids or [0])[0]) if ids else None
+            path = Path(str(getattr(card, "path", "") or ""))
+            folder = path.parent if path.suffix else path
+            if folder.is_dir():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+            return
+        if chosen is clear_act:
+            self._clear_sel()
 
     def _on_hicbiri(self) -> None:
         """Hiçbiri → mevcut Teach (Şu…) diyaloğu; paralel öğrenme yok."""
@@ -1018,19 +1471,155 @@ class TeachMePanel(QWidget):
             dock.show()
             dock.raise_()
 
-    def _apply_teach(self, ids: list[int], label: str, overlay: dict | None = None) -> dict:
-        self._set_busy(True)
-        try:
-            db = Database(self.settings.db_path)
-            stats = teach_files(
-                db, str(self.settings.db_path), ids, label, overlay=overlay
+    def _refresh_tab_counts(self) -> None:
+        self.tabs.setTabText(0, f"Tanımsızlar ({len(self._cards['undefined'])})")
+        self.tabs.setTabText(1, f"Şüpheliler ({len(self._cards['suspicious'])})")
+        self.tabs.setTabText(2, f"Kararsızlar ({len(self._cards['undecided'])})")
+        self.tabs.setTabText(3, f"Yeni Kavram ({len(self._cards['new_concept'])})")
+
+    def _pool_list_widget(self, key: str) -> QListWidget:
+        if key == "suspicious":
+            return self.list_suspicious
+        if key == "undecided":
+            return self.list_undecided
+        if key == "new_concept":
+            return self.list_new_concept
+        return self.list_undefined
+
+    def _optimistic_remove_ids(
+        self, file_ids: list[int]
+    ) -> list[tuple[str, TeachMeCard]]:
+        """Remove cards intersecting file_ids from pools + list widgets."""
+        target = {int(i) for i in (file_ids or []) if int(i) > 0}
+        if not target:
+            return []
+        removed: list[tuple[str, TeachMeCard]] = []
+        for key in ("undefined", "suspicious", "undecided", "new_concept"):
+            cards = list(self._cards.get(key) or [])
+            keep: list[TeachMeCard] = []
+            removed_fids: set[int] = set()
+            for card in cards:
+                if _card_member_ids(card) & target:
+                    removed.append((key, card))
+                    removed_fids.add(int(card.file_id))
+                else:
+                    keep.append(card)
+            self._cards[key] = keep
+            if not removed_fids:
+                continue
+            widget = self._pool_list_widget(key)
+            for i in range(widget.count() - 1, -1, -1):
+                item = widget.item(i)
+                if item is None:
+                    continue
+                fid = int(item.data(Qt.ItemDataRole.UserRole) or 0)
+                if fid in removed_fids or fid in target:
+                    widget.takeItem(i)
+        self._refresh_tab_counts()
+        self._update_review_detail()
+        return removed
+
+    def _restore_optimistic_cards(
+        self, snapshot: list[tuple[str, TeachMeCard]]
+    ) -> None:
+        """Put optimistically removed cards back (teach failure)."""
+        if not snapshot:
+            return
+        for key, card in snapshot:
+            pool = self._cards.setdefault(key, [])
+            existing = {int(c.file_id) for c in pool}
+            if int(card.file_id) in existing:
+                continue
+            pool.append(card)
+            widget = self._pool_list_widget(key)
+            self._add_pool_card_item(
+                widget, card, gen=self._fill_gen, with_icon=True
             )
-        finally:
-            self._set_busy(False)
-        self.taught.emit(label, int(stats.get("taught") or 0))
+        self._refresh_tab_counts()
+        self._update_review_detail()
+
+    def _clear_teach_worker_ref_if_same(self, worker) -> None:
+        if getattr(self, "_teach_worker", None) is worker:
+            self._teach_worker = None
+
+    def _on_teach_worker_finished(self) -> None:
+        sender = self.sender()
+        self._clear_teach_worker_ref_if_same(sender)
+
+    def _on_teach_finished_ok(self, label: str, stats: object) -> None:
+        self._optimistic_removed = []
+        taught = 0
+        if isinstance(stats, dict):
+            taught = int(stats.get("taught") or 0)
+        self._set_busy(False)
+        self.taught.emit(str(label or ""), taught)
         self._keep_host_visible()
+        # Visible → async inbox worker (collapse stays off UI thread).
         self.reload()
-        return stats
+
+    def _on_teach_failed(self, label: str, message: str) -> None:
+        snap = list(self._optimistic_removed or [])
+        self._optimistic_removed = []
+        failed_ids: set[int] = set()
+        for _key, card in snap:
+            failed_ids |= _card_member_ids(card)
+        self._pending_taught_ids -= failed_ids
+        self._restore_optimistic_cards(snap)
+        self._set_busy(False)
+        msg = str(message or "bilinmeyen hata")
+        self.lbl_review.setText(f"Öğretilemedi: {msg}")
+        self._keep_host_visible()
+
+    def _apply_teach(
+        self,
+        ids: list[int],
+        label: str = "",
+        overlay: dict | None = None,
+        labels: list[str] | None = None,
+    ) -> dict:
+        """Start teach_files off UI thread; optimistic-remove cards immediately."""
+        from core.qthread_lifecycle import qthread_is_running, should_defer_new_worker
+
+        clean_ids = [int(i) for i in (ids or []) if int(i) > 0]
+        labs: list[str] = []
+        for raw in list(labels or []) + ([label] if label else []):
+            name = " ".join(str(raw or "").strip().split())
+            if name and name.casefold() not in {x.casefold() for x in labs}:
+                labs.append(name)
+        if not clean_ids or not labs:
+            return {}
+        if should_defer_new_worker(qthread_is_running(self._teach_worker)):
+            self.lbl_review.setText("Öğretme sürüyor…")
+            return {}
+
+        display = " + ".join(labs)
+        self._set_busy(True)
+        self.lbl_review.setText(f"Öğretiliyor: {display}…")
+        self._optimistic_removed = self._optimistic_remove_ids(clean_ids)
+        self._pending_taught_ids.update(clean_ids)
+        for _key, card in self._optimistic_removed:
+            self._pending_taught_ids |= _card_member_ids(card)
+
+        w = _TeachMeTeachWorker(
+            str(self.settings.db_path),
+            clean_ids,
+            labels=labs,
+            overlay=overlay,
+            parent=self,
+        )
+        self._teach_worker = w
+        w.finished_ok.connect(self._on_teach_finished_ok)
+        w.failed.connect(self._on_teach_failed)
+        w.finished.connect(self._on_teach_worker_finished)
+        w.finished.connect(w.deleteLater)
+        try:
+            w.destroyed.connect(
+                lambda *_a, worker=w: self._clear_teach_worker_ref_if_same(worker)
+            )
+        except Exception:
+            pass
+        w.start()
+        return {}
 
     def _set_busy(self, busy: bool) -> None:
         for btn in (
@@ -1053,6 +1642,12 @@ class TeachMePanel(QWidget):
         ids = self._expanded_selected_ids()
         if not ids:
             return
+        # Şüpheli/Kararsız + işaretli adaylar → dialog yok, doğrudan teach
+        if self._pool_allows_quick_candidates():
+            picks = self._checked_candidate_labels()
+            if picks:
+                self._apply_teach(ids, labels=picks)
+                return
         db = Database(self.settings.db_path)
         path = str(self.settings.db_path)
         snaps = [snapshot_file_classification(db, fid) for fid in ids]
