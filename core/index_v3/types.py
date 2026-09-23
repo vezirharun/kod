@@ -54,8 +54,8 @@ class JobState(str, Enum):
     FAILED_PERMANENT = "failed_permanent"
 
 
-# Hızlı İndeks yalnızca Preview havuzunu oluşturur ve Thumbnail'ı
-# hazır Preview'dan üretir. Hash/Metadata Genel AI lane'ine aittir.
+# Hızlı İndeks: Preview (1024) ve Thumbnail (256) bağımsız light artifact'lerdir.
+# Thumbnail kaynak veya mevcut Preview'dan üretilebilir; Preview zorunlu değildir.
 LIGHT_ARTIFACTS: tuple[Artifact, ...] = (
     Artifact.THUMBNAIL,
     Artifact.PREVIEW,

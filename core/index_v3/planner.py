@@ -53,26 +53,26 @@ def plan_jobs_for_file(
     manual_patch: bool = False,
     manual_ocr: bool = False,
 ) -> list[Job]:
-    """Artifact-level plan with strict Preview -> Thumbnail -> General AI flow.
+    """Artifact-level plan: Preview + Thumbnail independent; GA gated on Preview.
 
-    FAST: Preview is the first source artifact. Thumbnail is generated only
-    from the Preview pool and completes the Fast Index.
+    FAST: Preview and Thumbnail are planned independently. Thumbnail may be
+    produced from source (256px) without requiring FeaturePreview (1024).
+    When a Preview already exists, the processor prefers preview→thumb.
 
-    GENERAL_AI: normally consumes ready Preview. When Preview is physically
-    missing, plans a single Preview repair job so heavy work is not stuck;
-    it still does not invent Thumbnail or run heavy until Preview is READY.
+    GENERAL_AI: Preview repair when missing (unblocks heavy); no Thumbnail
+    invent / no heavy until Preview is READY.
 
-    COMPLETE/REPAIR: runs both lanes, while still respecting the Preview gate.
+    COMPLETE/REPAIR: both lanes; heavy still respects the Preview gate.
     """
     jobs: list[Job] = []
     want_fast = mode in (Mode.FAST, Mode.COMPLETE, Mode.REPAIR) or repair
     want_general = mode in (Mode.GENERAL_AI, Mode.COMPLETE, Mode.REPAIR) or repair
 
-    # FAST: Preview only. GENERAL_AI: Preview repair when missing (unblocks heavy).
+    # FAST lane: Preview and Thumbnail are independent light artifacts.
     if want_fast:
         if not report.ready(Artifact.PREVIEW):
             jobs.append(Job(report.file_id, Artifact.PREVIEW, QueueKind.PREVIEW, report.source_id, report.path))
-        if report.ready(Artifact.PREVIEW) and not report.ready(Artifact.THUMBNAIL):
+        if not report.ready(Artifact.THUMBNAIL):
             jobs.append(Job(report.file_id, Artifact.THUMBNAIL, QueueKind.LIGHT, report.source_id, report.path))
     elif want_general and not report.preview_ready:
         # Smallest GA unblock: repair Preview only; no Thumbnail / no heavy yet.

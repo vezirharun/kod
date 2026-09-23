@@ -10,10 +10,20 @@ def report(preview=False, thumb=False, hash=False, metadata=False, dino=False):
 
 
 def test_fast_preview_first_then_thumbnail():
-    jobs=plan_jobs_for_file(report(), Mode.FAST)
-    assert [j.artifact for j in jobs] == [Artifact.PREVIEW]
-    r=report(preview=True)
-    jobs=plan_jobs_for_file(r, Mode.FAST)
+    jobs = plan_jobs_for_file(report(), Mode.FAST)
+    assert {j.artifact for j in jobs} == {Artifact.PREVIEW, Artifact.THUMBNAIL}
+    assert all(
+        j.queue == QueueKind.PREVIEW
+        for j in jobs
+        if j.artifact == Artifact.PREVIEW
+    )
+    assert all(
+        j.queue == QueueKind.LIGHT
+        for j in jobs
+        if j.artifact == Artifact.THUMBNAIL
+    )
+    r = report(preview=True)
+    jobs = plan_jobs_for_file(r, Mode.FAST)
     assert [j.artifact for j in jobs] == [Artifact.THUMBNAIL]
     assert jobs[0].queue == QueueKind.LIGHT
 

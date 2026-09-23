@@ -764,11 +764,11 @@ class Worker:
                 self.stats.completed += 1
                 self._enqueue_downstream_after_preview(job)
                 return False
-        # Preview is the single image source gate for Thumbnail + all General AI.
+        # Preview gates General AI only. Thumbnail is independent (source or preview).
         # General AI never falls back to the original source.
         if (
-            job.artifact == Artifact.THUMBNAIL
-            or (job.queue in (QueueKind.HEAVY, QueueKind.REPAIR) and job.artifact in (
+            job.queue in (QueueKind.HEAVY, QueueKind.REPAIR)
+            and job.artifact in (
                 Artifact.HASH,
                 Artifact.METADATA,
                 Artifact.DINO,
@@ -780,7 +780,7 @@ class Worker:
                 Artifact.OWLV2,
                 Artifact.PATCH,
                 Artifact.OCR,
-            ))
+            )
         ):
             if not report.preview_ready:
                 # Permanent Preview failure → drop this claim as stale (no spin).
@@ -850,6 +850,7 @@ class Worker:
             wait_gate = (
                 "preview_required" in err
                 or "preview_required_for_thumbnail" in err
+                or "thumbnail_deferred" in err
                 or "search_session" in err
                 or "frozen_or_search" in err
                 or "INDEX_FROZEN_WRITE_BLOCKED" in err
@@ -863,6 +864,8 @@ class Worker:
                     or exc.__class__.__name__ == "IndexFrozenWriteBlocked"
                 ):
                     reason = "search_session"
+                elif "thumbnail_deferred" in err:
+                    reason = "thumbnail_deferred"
                 elif "preview_required" in err:
                     reason = "preview_required"
                 self.store.release_dep_wait(

@@ -245,6 +245,30 @@ class BackgroundIndexScan:
         except Exception as exc:
             self.stats.last_error = f"preview_heal:{exc}"[:300]
 
+        # Controlled 256px thumb backfill (no FeaturePreview force).
+        if not self._wait():
+            return
+        self.stats.phase = "thumbnail_backfill"
+        self._emit(progress_callback)
+        try:
+            from core.index_v3.discovery import enqueue_missing_thumbnail_jobs
+
+            busy = False
+            try:
+                busy = int(self.store.count_pending() or 0) > 200
+            except Exception:
+                busy = False
+            thumb_lim = 10 if busy else max(20, min(int(self.chunk_size), 80))
+            tb = enqueue_missing_thumbnail_jobs(
+                self.db,
+                self.store,
+                source_ids=source_ids,
+                limit=thumb_lim,
+            )
+            self.stats.gaps_enqueued += int(tb.get("queued") or 0)
+        except Exception as exc:
+            self.stats.last_error = f"thumb_backfill:{exc}"[:300]
+
         if not self._wait():
             return
         self.stats.phase = "gap_scan"

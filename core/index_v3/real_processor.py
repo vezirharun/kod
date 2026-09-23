@@ -266,7 +266,8 @@ class RealArtifactProcessor:
             return self._process_preview(db, job, row, path)
 
         if art == Artifact.THUMBNAIL:
-            # Hızlı İndeks Thumbnail'ı yalnızca Preview havuzundan okur.
+            # Prefer existing FeaturePreview → 256 thumb (no NAS). Else source → 256.
+            # Never forces FeaturePreview creation for the whole archive.
             preview_candidates = [
                 str(row.get("feature_preview_path") or "").strip(),
             ]
@@ -293,8 +294,46 @@ class RealArtifactProcessor:
                 )
                 if thumb_ok:
                     return True
-            # Preview yoksa bu iş hata değildir; worker dependency gate ile bekletir.
-            raise RuntimeError("preview_required_for_thumbnail")
+            # Independent 256px from source (cache HIT inside Thumbnailer.create).
+            result = self.thumbnailer.create(path)
+            if result.success and result.thumbnail_path:
+                db.upsert_file({
+                    "path": path,
+                    "thumbnail_path": result.thumbnail_path,
+                    "width": int(result.width or 0),
+                    "height": int(result.height or 0),
+                    "thumbnail_status": "from_source",
+                })
+                thumb_ok = local_artifact_exists(result.thumbnail_path)
+                # Do not clobber preview readiness when thumb is source-derived.
+                prev_path = str(row.get("feature_preview_path") or "").strip()
+                prev_ok = (
+                    int(row.get("physical_preview_ready") or 0) == 1
+                    or (bool(prev_path) and local_artifact_exists(prev_path))
+                )
+                db.update_physical_readiness(
+                    job.file_id, thumbnail_ready=thumb_ok,
+                    preview_ready=prev_ok, requeue_missing=False,
+                )
+                if thumb_ok:
+                    return True
+            err = str(getattr(result, "error", "") or "thumbnail_create_failed")
+            soft = any(
+                t in err.lower()
+                for t in (
+                    "timeout",
+                    "network",
+                    "nas",
+                    "errno 22",
+                    "winerror",
+                    "temporarily",
+                    "unavailable",
+                    "permission",
+                )
+            )
+            if soft:
+                raise RuntimeError(f"thumbnail_deferred:{err}")
+            raise RuntimeError(f"thumbnail_create_failed:{err}")
 
         if art == Artifact.HASH:
             return self._process_hash(db, job, row, path)

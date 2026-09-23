@@ -17,8 +17,18 @@ def purge_broken_index_records(settings: AppSettings) -> dict[str, int]:
 
 
 def requeue_missing_thumbnails(settings: AppSettings) -> dict[str, int]:
+    """Enqueue V3 THUMBNAIL jobs for physical gaps (no FeaturePreview force)."""
+    from pathlib import Path
+
+    from core.index_v3.discovery import enqueue_missing_thumbnail_jobs
+    from core.index_v3.queues import JobStore
+
     db = Database(settings.db_path)
-    return db.requeue_files_missing_thumbnails()
+    job_path = Path(settings.db_path).with_name(
+        Path(settings.db_path).stem + ".v3jobs.db"
+    )
+    store = JobStore(job_path)
+    return enqueue_missing_thumbnail_jobs(db, store, limit=200)
 
 
 def queue_missing_ai_embeddings(settings: AppSettings) -> dict[str, int]:

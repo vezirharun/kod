@@ -82,7 +82,7 @@ def test_d_ui_mode_map_and_general_not_fast_session():
 
 def test_e_complete_plans_both_lanes_when_preview_ready():
     jobs = plan_jobs_for_file(_report(), Mode.COMPLETE)
-    assert {j.artifact for j in jobs} == {Artifact.PREVIEW}
+    assert {j.artifact for j in jobs} == {Artifact.PREVIEW, Artifact.THUMBNAIL}
     jobs2 = plan_jobs_for_file(_report(preview=True), Mode.COMPLETE)
     arts = {j.artifact for j in jobs2}
     assert Artifact.THUMBNAIL in arts

@@ -13,7 +13,7 @@ from core.index_v3.artifact_state import assess_file, assess_rows, plan_missing
 from core.index_v3.physical_reconcile import reconcile_stale_physical_flags
 from core.index_v3.planner import plan_jobs_for_file, reconcile_stale_pendings
 from core.index_v3.queues import JobStore
-from core.index_v3.types import Artifact, Mode
+from core.index_v3.types import Artifact, Job, Mode, QueueKind
 from core.settings import SUPPORTED_EXTENSIONS
 from core.utils import fs_access_path, normalize_path, normalize_source_root
 
@@ -494,3 +494,62 @@ def enqueue_existing_gaps(
             if max_examine is not None and examined >= max_examine:
                 return n, last_id
         # limit yoksa sonraki dosya chunk'ına devam (ilk 300'de kesme)
+
+
+def enqueue_missing_thumbnail_jobs(
+    db: Any,
+    store: JobStore,
+    *,
+    source_ids: list[int] | None = None,
+    limit: int = 50,
+) -> dict[str, int]:
+    """Thumb-only backfill: enqueue Artifact.THUMBNAIL without FeaturePreview.
+
+    Selects files with physical_thumbnail_ready!=1. Does not plan PREVIEW
+    (avoids forcing 1024px FeaturePreview across the archive). Idempotent via
+    JobStore.enqueue. Newer file ids first (recent index priority).
+    """
+    lim = max(1, int(limit or 50))
+    sids = [int(s) for s in (source_ids or []) if int(s or 0) > 0]
+    params: list[Any] = []
+    sql = """
+        SELECT id, source_id, path FROM files
+        WHERE status NOT IN ('excluded_internal','missing')
+          AND ifnull(physical_thumbnail_ready, 0) != 1
+    """
+    if sids:
+        placeholders = ",".join("?" * len(sids))
+        sql += f" AND source_id IN ({placeholders})"
+        params.extend(sids)
+    # Prefer cheap raster first (avoid NAS TIF/vector timeout storms).
+    sql += """
+        ORDER BY
+          CASE
+            WHEN lower(path) LIKE '%.jpg' OR lower(path) LIKE '%.jpeg'
+              OR lower(path) LIKE '%.png' OR lower(path) LIKE '%.bmp'
+              OR lower(path) LIKE '%.webp' THEN 0
+            ELSE 1
+          END,
+          id DESC
+        LIMIT ?
+    """
+    params.append(lim)
+    with db.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    jobs: list[Job] = []
+    for row in rows:
+        jobs.append(
+            Job(
+                int(row["id"]),
+                Artifact.THUMBNAIL,
+                QueueKind.LIGHT,
+                int(row["source_id"] or 0),
+                str(row["path"] or ""),
+            )
+        )
+    if not jobs:
+        return {"queued": 0, "examined": 0}
+    added = int(
+        store.enqueue(jobs, reopen_permanent=False, reopen_done=True) or 0
+    )
+    return {"queued": added, "examined": len(jobs)}

@@ -159,7 +159,7 @@ def test_lanes_run_independently():
     }
     empty = _report()
     fast = {j.artifact for j in plan_jobs_for_file(empty, Mode.FAST)}
-    assert fast == {Artifact.PREVIEW}
+    assert fast == {Artifact.PREVIEW, Artifact.THUMBNAIL}
     assert not (fast & ga)
     assert Artifact.PATCH not in fast
     assert Artifact.OCR not in fast

@@ -24,12 +24,12 @@ def _legacy_dino_preview_missing() -> FileArtifactReport:
 
 def test_example_b_repair_only_plans_preview():
     jobs = plan_jobs_for_file(_legacy_dino_preview_missing(), Mode.REPAIR, repair=True)
-    assert [j.artifact for j in jobs] == [Artifact.PREVIEW]
+    assert {j.artifact for j in jobs} == {Artifact.PREVIEW, Artifact.THUMBNAIL}
 
 
 def test_example_b_complete_only_plans_preview():
     jobs = plan_jobs_for_file(_legacy_dino_preview_missing(), Mode.COMPLETE)
-    assert [j.artifact for j in jobs] == [Artifact.PREVIEW]
+    assert {j.artifact for j in jobs} == {Artifact.PREVIEW, Artifact.THUMBNAIL}
 
 
 def test_example_b_general_ai_only_plans_preview_repair():

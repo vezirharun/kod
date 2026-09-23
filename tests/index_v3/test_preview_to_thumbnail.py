@@ -282,7 +282,7 @@ def test_discovery_then_fast_light_complete_without_waiting_full_preview_drain(t
         )
     }
     assert "preview" in arts
-    assert "thumbnail" not in arts
+    assert "thumbnail" in arts
     eng = IndexEngineV3(
         db,
         job_db_path=tmp_path / "jobs.db",

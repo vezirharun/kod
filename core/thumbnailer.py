@@ -157,51 +157,9 @@ class Thumbnailer:
         source = normalize_path(source_path)
         ext = Path(source).suffix.lower()
         out_path = self.thumbnail_path_for(source)
-        if out_path.exists() and out_path.stat().st_size > 0:
-            eps_ai = ext in {".eps", ".ai"}
-            if eps_ai:
-                # Do not HIT on tiny/white EPS stubs — unlink and fall through.
-                usable = False
-                try:
-                    from core.thumb_resolve import is_eps_ai_thumb_usable
-
-                    usable = is_eps_ai_thumb_usable(out_path)
-                except Exception:
-                    try:
-                        from core.preview_renderer import _eps_ai_preview_gate
-
-                        usable, _ = _eps_ai_preview_gate(out_path)
-                    except Exception:
-                        usable = out_path.stat().st_size >= 512
-                if not usable:
-                    try:
-                        out_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                else:
-                    try:
-                        with Image.open(out_path) as img:
-                            w, h = img.size
-                        return ThumbnailResult(
-                            success=True,
-                            thumbnail_path=str(out_path),
-                            width=w,
-                            height=h,
-                        )
-                    except Exception:
-                        pass
-            else:
-                try:
-                    with Image.open(out_path) as img:
-                        w, h = img.size
-                    return ThumbnailResult(
-                        success=True,
-                        thumbnail_path=str(out_path),
-                        width=w,
-                        height=h,
-                    )
-                except Exception:
-                    pass
+        hit = self._try_cache_hit(source, out_path, ext)
+        if hit is not None:
+            return hit
 
         from core.index_freeze import guard_index_write
 
@@ -294,6 +252,53 @@ class Thumbnailer:
                     return ThumbnailResult(success=False, error=str(exc))
                 raise
         return _render_or_pillow()
+
+    def _try_cache_hit(
+        self, source: str, out_path: Path, ext: str
+    ) -> ThumbnailResult | None:
+        """Return HIT result, or None to rebuild. Stale source mtime → miss."""
+        if not out_path.exists() or out_path.stat().st_size <= 0:
+            return None
+        try:
+            src_p = Path(source)
+            if src_p.is_file() and out_path.stat().st_mtime + 1.0 < src_p.stat().st_mtime:
+                try:
+                    out_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+        except OSError:
+            pass
+        if ext in {".eps", ".ai"}:
+            usable = False
+            try:
+                from core.thumb_resolve import is_eps_ai_thumb_usable
+
+                usable = is_eps_ai_thumb_usable(out_path)
+            except Exception:
+                try:
+                    from core.preview_renderer import _eps_ai_preview_gate
+
+                    usable, _ = _eps_ai_preview_gate(out_path)
+                except Exception:
+                    usable = out_path.stat().st_size >= 512
+            if not usable:
+                try:
+                    out_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+        try:
+            with Image.open(out_path) as img:
+                w, h = img.size
+            return ThumbnailResult(
+                success=True,
+                thumbnail_path=str(out_path),
+                width=w,
+                height=h,
+            )
+        except Exception:
+            return None
 
     def create_from_existing_preview(self, source_path: str, preview_path: str) -> ThumbnailResult:
         """Mevcut Preview'dan Thumbnail üretir; kaynak dosyayı yeniden okumaz."""
