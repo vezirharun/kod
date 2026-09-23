@@ -1,0 +1,27 @@
+{
+  "timestamp": "20260923_115013",
+  "startup_root_cause": "FeaturePreviewCache.create on detail QRunnable; GIL/NAS + shared thumb pool + early inspector enqueue",
+  "background_task_root_cause": "wait_until_finished(500) then clear while BackgroundTask still running",
+  "multi_select_root_cause": "child QWidget selection sync; setCurrentItem collapsed ExtendedSelection",
+  "right_click_root_cause": "right press used left-click clearSelection path; context menu swallow risk",
+  "candidate_generation_status": "UI uses card.rivals only; floral-only in prod => CANDIDATE GENERATION GAP or multi intersection — no fake labels",
+  "kararsizlar_startup_status": "async inbox worker unchanged; rivals on card at build time",
+  "shutdown_smoke": {"cycles": 20, "still_running": 0, "pass": true},
+  "tests": {
+    "test_startup_background_teachme_fix": "PASS",
+    "test_teach_me_multiselect_context": "PASS",
+    "test_teach_me": "PASS",
+    "test_qthread_lifecycle": "PASS",
+    "test_status_worker_deleted_ref": "PASS"
+  },
+  "scores": {
+    "BACKGROUNDTASK": "PASS",
+    "STARTUP_SCHEDULING": "PASS",
+    "TEACHME_SELECTION_RIGHT_CLICK": "PASS",
+    "FAIL": 0,
+    "WARNING": 1,
+    "UNTESTED": 2,
+    "BLOCKED": 0
+  },
+  "push": false
+}

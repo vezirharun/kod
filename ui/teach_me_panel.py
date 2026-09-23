@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QSize, QRect, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QSize, QRect, QThread, QTimer, QUrl, Signal, QPoint
 from PySide6.QtGui import QAction, QDesktopServices, QFontMetrics, QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -197,6 +197,9 @@ class _CandidateCardWidget(QWidget):
         self._checks: list[QCheckBox] = []
         self.setObjectName("teachCandidateCard")
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        # Context menu: mousePress RightButton → panel (CustomContextMenu swallow risk).
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._selected = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
@@ -238,6 +241,29 @@ class _CandidateCardWidget(QWidget):
             )
         )
 
+    def set_selected(self, selected: bool) -> None:
+        """Kartın gerçek QListWidget seçimini kullanıcıya görünür kıl."""
+        selected = bool(selected)
+        if self._selected == selected:
+            return
+        self._selected = selected
+        if selected:
+            self.setStyleSheet(
+                "QWidget#teachCandidateCard {"
+                " border: 3px solid #4da3ff;"
+                " border-radius: 4px;"
+                " background-color: #1a3050;"
+                "}"
+            )
+        else:
+            self.setStyleSheet(
+                "QWidget#teachCandidateCard {"
+                " border: 1px solid transparent;"
+                " border-radius: 4px;"
+                " background-color: transparent;"
+                "}"
+            )
+
     def set_candidates_visible(self, visible: bool) -> None:
         want = bool(visible) and bool(self._checks)
         if self.cand_host.isVisible() == want:
@@ -278,10 +304,27 @@ class _CandidateCardWidget(QWidget):
             self._panel._on_card_widget_hover(self, False)
         super().leaveEvent(event)
 
+    def _on_context_menu(self, pos: QPoint) -> None:
+        if self._panel is None:
+            return
+        lw = self._panel._active_list()
+        global_pos = self.mapToGlobal(pos)
+        list_pos = lw.mapFromGlobal(global_pos)
+        self._panel._on_pool_context_menu(list_pos)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        btn = event.button() if event is not None else Qt.MouseButton.NoButton
         if self._panel is not None:
-            self._panel._focus_card_widget(self, event)
-        super().mousePressEvent(event)
+            if btn == Qt.MouseButton.RightButton:
+                # Sağ tık: çoklu seçimi koru; context menu path'ini karttan tetikle.
+                # accept() CustomContextMenu sinyalini yutabileceği için doğrudan forward.
+                self._panel._focus_card_widget_for_context(self)
+                self._on_context_menu(event.position().toPoint())
+                event.accept()
+                return
+            if btn == Qt.MouseButton.LeftButton:
+                self._panel._focus_card_widget(self, event)
+        event.accept()
 
 
 class _ListHoverFilter(QObject):
@@ -715,27 +758,59 @@ class TeachMePanel(QWidget):
                 lw.doItemsLayout()
                 break
 
-    def _focus_card_widget(self, card_w: _CandidateCardWidget, event) -> None:
-        """Kart tıklanınca liste seçimini senkronla (Ctrl ile çoklu korunur)."""
+    def _item_for_card_widget(
+        self, card_w: _CandidateCardWidget
+    ) -> QListWidgetItem | None:
         lw = self._active_list()
-        target = None
         for i in range(lw.count()):
             item = lw.item(i)
             if item is not None and lw.itemWidget(item) is card_w:
-                target = item
-                break
+                return item
+        return None
+
+    def _focus_card_widget(self, card_w: _CandidateCardWidget, event) -> None:
+        """Kart tıklanınca liste seçimini senkronla (Ctrl/Shift ExtendedSelection)."""
+        lw = self._active_list()
+        target = self._item_for_card_widget(card_w)
         if target is None:
             return
         mods = event.modifiers() if event is not None else Qt.KeyboardModifier.NoModifier
         if mods & Qt.KeyboardModifier.ControlModifier:
             target.setSelected(not target.isSelected())
+            # Do not call setCurrentItem — it can re-select / collapse ExtendedSelection.
         elif mods & Qt.KeyboardModifier.ShiftModifier:
+            anchor = lw.currentItem()
+            if anchor is None:
+                lw.clearSelection()
+                target.setSelected(True)
+            else:
+                a = lw.row(anchor)
+                b = lw.row(target)
+                if a < 0 or b < 0:
+                    target.setSelected(True)
+                else:
+                    lo, hi = (a, b) if a <= b else (b, a)
+                    for i in range(lo, hi + 1):
+                        it = lw.item(i)
+                        if it is not None:
+                            it.setSelected(True)
             lw.setCurrentItem(target)
-            target.setSelected(True)
         else:
             lw.clearSelection()
             lw.setCurrentItem(target)
             target.setSelected(True)
+
+    def _focus_card_widget_for_context(self, card_w: _CandidateCardWidget) -> None:
+        """Sağ tık: seçili kartta multi-select korunur; değilse yalnızca bu kart."""
+        lw = self._active_list()
+        target = self._item_for_card_widget(card_w)
+        if target is None:
+            return
+        if target.isSelected():
+            # setCurrentItem ExtendedSelection'da diğer seçimleri düşürebilir — dokunma.
+            return
+        lw.clearSelection()
+        target.setSelected(True)
 
     def _on_card_widget_hover(
         self, card_w: _CandidateCardWidget, entered: bool
@@ -754,7 +829,9 @@ class TeachMePanel(QWidget):
         selected = set(self.selected_ids())
         hover = int(getattr(self, "_hover_fid", 0) or 0)
         for cw in self._iter_candidate_card_widgets():
-            show = int(cw.file_id) in selected or int(cw.file_id) == hover
+            is_selected = int(cw.file_id) in selected
+            show = is_selected or int(cw.file_id) == hover
+            cw.set_selected(is_selected)
             cw.set_candidates_visible(show)
 
     def _on_tab_changed(self, _i: int = 0) -> None:

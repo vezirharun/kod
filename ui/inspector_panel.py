@@ -517,30 +517,32 @@ class InspectorPanel(QWidget):
         self._detail_native_size = (0, 0)
 
         if result.thumbnail_path or result.path:
-            # Candidate feature path only — worker validates; no isfile on UI thread.
-            fp = ""
-            try:
-                from core.preview_cache import FeaturePreviewCache
-
-                cache_dir = str(getattr(sched, "_cache_dir", "") or "")
-                if cache_dir and result.path:
-                    fp = str(
-                        FeaturePreviewCache(cache_dir).preview_path_for(
-                            str(result.path)
-                        )
-                    )
-            except Exception:
+            # Hidden inspector: no FeaturePreviewCache.create storms at startup.
+            if self.isVisible():
+                # Candidate feature path only — worker validates; no isfile on UI thread.
                 fp = ""
+                try:
+                    from core.preview_cache import FeaturePreviewCache
 
-            sched.request_detail_preview(
-                fid,
-                str(result.thumbnail_path or ""),
-                source_path=str(result.path or ""),
-                filename=str(result.filename or ""),
-                feature_preview_path=fp,
-                size=1024,
-                priority=0,
-            )
+                    cache_dir = str(getattr(sched, "_cache_dir", "") or "")
+                    if cache_dir and result.path:
+                        fp = str(
+                            FeaturePreviewCache(cache_dir).preview_path_for(
+                                str(result.path)
+                            )
+                        )
+                except Exception:
+                    fp = ""
+
+                sched.request_detail_preview(
+                    fid,
+                    str(result.thumbnail_path or ""),
+                    source_path=str(result.path or ""),
+                    filename=str(result.filename or ""),
+                    feature_preview_path=fp,
+                    size=1024,
+                    priority=0,
+                )
         else:
             self.thumb.clear()
             self.thumb.setText("!")

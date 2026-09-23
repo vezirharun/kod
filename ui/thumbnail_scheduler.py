@@ -207,11 +207,15 @@ class _LoadRunnable(QRunnable):
                 logger.info("DETAIL file_id=%s CACHE HIT path=%s", self._file_id, path)
                 return path
 
-        # Cache miss → medium preview üret (NAS burada, worker thread)
+        # Cache miss → medium preview üret (NAS burada, detail pool; GIL/NAS UI'ı kilitleyebilir —
+        # kısa yield ile heartbeat'e fırsat ver, sonra create).
         if fp_cache is not None and self._source_path and source_file_exists(
             self._source_path
         ):
             try:
+                import time as _time
+
+                _time.sleep(0.001)
                 logger.info(
                     "DETAIL file_id=%s CACHE MISS → FeaturePreviewCache.create",
                     self._file_id,
@@ -407,6 +411,14 @@ class ThumbnailScheduler(QObject):
         super().__init__(parent)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(MAX_CONCURRENT)
+        # Detail/FeaturePreviewCache.create can hold the GIL (PIL/NAS). Keep it off the
+        # thumb pool and serialize so list scrolling stays responsive during cache miss.
+        self._detail_pool = QThreadPool(self)
+        self._detail_pool.setMaxThreadCount(1)
+        # Default True so unit tests / non-MainWindow hosts are unaffected.
+        # MainWindow sets False until first interactive frame, then mark_ui_interactive().
+        self._detail_ui_ready = True
+        self._detail_deferred: list[tuple] = []
         self._heap: list[_ThumbTask] = []
         self._queued: set[int] = set()
         self._in_flight: set[int] = set()
@@ -457,6 +469,7 @@ class ThumbnailScheduler(QObject):
             self._queued.clear()
             self._in_flight.clear()
             self._detail_in_flight.clear()
+            self._detail_deferred.clear()
             self._loaded.clear()
             self._image_cache.clear()
             self._detail_cache.clear()
@@ -470,6 +483,41 @@ class ThumbnailScheduler(QObject):
     def peek_detail_meta(self, file_id: int) -> dict[str, Any]:
         with self._lock:
             return dict(self._detail_meta.get(int(file_id), {}))
+
+    def mark_ui_interactive(self) -> None:
+        """Call after MainWindow is shown — flush deferred detail creates."""
+        self._detail_ui_ready = True
+        pending = list(self._detail_deferred)
+        self._detail_deferred.clear()
+        for args in pending:
+            self._start_detail_runnable(*args)
+
+    def _start_detail_runnable(
+        self,
+        fid: int,
+        thumb: str,
+        size: int,
+        source_path: str,
+        filename: str,
+        fp: str,
+        gen: int,
+    ) -> None:
+        runnable = _LoadRunnable(
+            fid,
+            thumb,
+            size,
+            source_path,
+            filename,
+            self._cache_dir,
+            self._thumbnailer,
+            lambda f, img, sz, reason, name, resolved, g=gen: self._finish_detail(
+                f, img, sz, reason, name, resolved, g
+            ),
+            mode="detail",
+            feature_preview_path=fp,
+            feature_previewer=self._feature_previewer,
+        )
+        self._detail_pool.start(runnable)
 
     def request_detail_preview(
         self,
@@ -508,22 +556,15 @@ class ThumbnailScheduler(QObject):
             self._detail_in_flight.add(fid)
             gen = self._generation
 
-        runnable = _LoadRunnable(
-            fid,
-            thumb,
-            size,
-            source_path,
-            filename,
-            self._cache_dir,
-            self._thumbnailer,
-            lambda f, img, sz, reason, name, resolved, g=gen: self._finish_detail(
-                f, img, sz, reason, name, resolved, g
-            ),
-            mode="detail",
-            feature_preview_path=fp,
-            feature_previewer=self._feature_previewer,
-        )
-        self._pool.start(runnable)
+        args = (fid, thumb, size, source_path, filename, fp, gen)
+        # Startup: keep FeaturePreviewCache.create off the critical path until UI is usable.
+        if not self._detail_ui_ready:
+            self._detail_deferred = [
+                a for a in self._detail_deferred if a[0] != fid
+            ]
+            self._detail_deferred.append(args)
+            return
+        self._start_detail_runnable(*args)
 
     def _finish_detail(
         self,

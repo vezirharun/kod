@@ -396,6 +396,10 @@ class MainWindow(QMainWindow):
                 self.settings.thumbnail_format,
             ),
         )
+        # Startup: queue detail cache-miss work only after first interactive frame.
+        self._thumb_scheduler._detail_ui_ready = False
+        QTimer.singleShot(0, self._mark_preview_scheduler_interactive)
+        QTimer.singleShot(250, self._mark_preview_scheduler_interactive)
         self.results_panel.set_thumbnail_scheduler(self._thumb_scheduler)
         import os as _os
 
@@ -2070,6 +2074,11 @@ class MainWindow(QMainWindow):
             stats.displayed = self.results_panel.visible_count()
             stats.remaining = max(0, int(getattr(self, "_filtered_total", 0)) - stats.displayed)
             self.results_panel.update_page_footer(stats)
+
+    def _mark_preview_scheduler_interactive(self) -> None:
+        sched = getattr(self, "_thumb_scheduler", None)
+        if sched is not None and hasattr(sched, "mark_ui_interactive"):
+            sched.mark_ui_interactive()
 
     def _on_ui_perf_updated(self, snap) -> None:
         search_q = 1 if self._is_search_worker_running() else 0
@@ -4764,10 +4773,38 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
 
+        # BackgroundTask.function is not mid-run cooperative; never clear/destroy
+        # while the QThread is still running (avoids native:
+        # "QThread: Destroyed while thread 'BackgroundTask' is still running").
         for task in list(self._background_tasks):
-            if task.isRunning():
+            try:
+                if not qobject_is_alive(task):
+                    self._background_tasks.discard(task)
+                    continue
                 task.request_stop()
-                task.wait_until_finished(500)
+            except RuntimeError:
+                self._background_tasks.discard(task)
+        for task in list(self._background_tasks):
+            try:
+                if not qobject_is_alive(task):
+                    self._background_tasks.discard(task)
+                    continue
+                if qthread_is_running(task):
+                    # Wait for real finish — 500ms was too short for startup probe /
+                    # DB mutations and left the thread running into QObject teardown.
+                    if not task.wait_until_finished(30_000):
+                        logger.warning(
+                            "BackgroundTask still running after 30s; detaching parent"
+                        )
+                        try:
+                            task.setParent(None)
+                            task.finished.connect(task.deleteLater)
+                        except RuntimeError:
+                            pass
+                        continue
+                self._background_tasks.discard(task)
+            except RuntimeError:
+                self._background_tasks.discard(task)
         self._background_tasks.clear()
 
     def closeEvent(self, event: QCloseEvent) -> None:
