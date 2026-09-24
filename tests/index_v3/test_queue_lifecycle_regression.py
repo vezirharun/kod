@@ -177,6 +177,7 @@ def test_failed_job_goes_to_end_of_queue_and_retries_after_normal_jobs(tmp_path:
     for j in nxt:
         store.complete(j.file_id, j.artifact)
 
+    time.sleep(1.05)  # soft-fail available_at backoff (min 1s)
     retry = store.claim(QueueKind.LIGHT, "w")[0]
     assert retry.file_id == 1
     store.fail(retry.file_id, retry.artifact, error="temporary", max_attempts=3)
@@ -191,6 +192,7 @@ def test_failed_job_goes_to_end_of_queue_and_retries_after_normal_jobs(tmp_path:
     for j in nxt2:
         store.complete(j.file_id, j.artifact)
 
+    time.sleep(2.05)  # attempts=2 → available_at backoff = 2s
     retry2 = store.claim(QueueKind.LIGHT, "w")[0]
     assert retry2.file_id == 1
     store.fail(retry2.file_id, retry2.artifact, error="temporary", max_attempts=3)

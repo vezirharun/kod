@@ -69,38 +69,38 @@ def test_gap_planner_moves_past_completed_first_chunk(tmp_path, monkeypatch):
 
     monkeypatch.setattr("core.index_v3.discovery.assess_file", _report)
 
-    # First chunk: 300 files, each gets light jobs.
+    # First chunk: limit counts jobs; FAST plans preview+thumb → 2 jobs/file.
     n1, last1 = enqueue_existing_gaps(
         db, store, source_id=1, mode=Mode.FAST, limit=300
     )
     assert n1 > 0
-    assert last1 == 300
+    assert last1 == 150
 
     # Simulate that the first chunk is fully completed.
     with store._connect() as conn:
-        conn.execute("UPDATE index_v3_jobs SET state='done' WHERE file_id <= 300")
+        conn.execute("UPDATE index_v3_jobs SET state='done' WHERE file_id <= 150")
         conn.commit()
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE files SET light_status='done' WHERE id <= 300"
+            "UPDATE files SET light_status='done' WHERE id <= 150"
         )
         conn.commit()
 
-    # The next planner call MUST select 301..600, not reopen 1..300.
+    # Continue after last_id — must select 151..300, not reopen 1..150.
     n2, last2 = enqueue_existing_gaps(
-        db, store, source_id=1, mode=Mode.FAST, limit=300
+        db, store, source_id=1, mode=Mode.FAST, limit=300, after_id=last1
     )
     assert n2 > 0
-    assert last2 == 600
+    assert last2 == 300
 
     with store._connect() as conn:
         ids = [r[0] for r in conn.execute(
             "SELECT DISTINCT file_id FROM index_v3_jobs WHERE state='pending' ORDER BY file_id"
         ).fetchall()]
     assert ids
-    assert min(ids) == 301
-    assert max(ids) == 600
-    assert not set(ids) & set(range(1, 301))
+    assert min(ids) == 151
+    assert max(ids) == 300
+    assert not set(ids) & set(range(1, 151))
 
 
 def test_gap_planner_stops_when_pending_already_exists(tmp_path, monkeypatch):

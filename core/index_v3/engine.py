@@ -332,6 +332,7 @@ class IndexEngineV3:
                         after_id=after_id,
                         ocr_enabled=self._ocr_enabled(),
                         patch_enabled=self._patch_enabled(),
+                        settings=getattr(self, "settings", None),
                     )
                     seeded += int(n)
                     if not after_id:
@@ -411,6 +412,7 @@ class IndexEngineV3:
                     limit=limit,
                     ocr_enabled=self._ocr_enabled() and auto_post,
                     patch_enabled=self._patch_enabled() and auto_post,
+                    settings=getattr(self, "settings", None),
                 )
                 if isinstance(r, tuple):
                     n += int(r[0])
@@ -545,6 +547,17 @@ class IndexEngineV3:
 
         def _drain_light_round(*, preview_first: bool) -> None:
             """Kısa dilimlerle PREVIEW/LIGHT — tek kuyruk diğerini aç bırakmasın."""
+            try:
+                released = self.store.maybe_release_jumbo_phase(
+                    source_ids=source_ids
+                )
+                if released:
+                    logger.info(
+                        "V3 jumbo phase release: %s light jobs now claimable",
+                        released,
+                    )
+            except Exception as exc:
+                logger.warning("V3 jumbo phase release failed: %s", exc)
             order = (
                 (QueueKind.PREVIEW, QueueKind.LIGHT)
                 if preview_first

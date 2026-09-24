@@ -119,6 +119,7 @@ class Job:
     source_id: int = 0
     path: str = ""
     owl_priority: int = 0
+    file_size: int = 0
 
     @property
     def key(self) -> str:

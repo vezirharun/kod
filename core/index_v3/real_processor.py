@@ -465,15 +465,27 @@ class RealArtifactProcessor:
                 pass
             return result
 
-        # Jumbo/UNC TIFF: hard timeout zaten worker'da permanent.
-        # retries=2 → 3×45s (~135s) worker kilidi; timeout'u tekrarlama.
-        preview_timeout = max(float(self.timeout_sec), 45.0)
+        # Jumbo TIFF (fast_tif_defer_mb): no short artificial timeout.
+        # Decode stays on the index worker thread pool (not UI). Nested _work is
+        # not picklable for use_process=True; Phase-1 deferral is the primary
+        # UI-freeze fix. Long ceiling avoids cutting natural jumbo runtime.
+        from core.index_v3.jumbo_phase import is_jumbo_for_queue
+
+        file_size = int(row.get("file_size") or 0)
+        jumbo = is_jumbo_for_queue(
+            path, file_size, getattr(self, "settings", None)
+        )
+        preview_timeout = (
+            24 * 3600.0
+            if jumbo
+            else max(float(self.timeout_sec), 45.0)
+        )
         risky = is_risky_path(path)
         try:
             result = run_with_timeout(
                 _work,
                 timeout_sec=preview_timeout,
-                retries=0 if risky else self.retries,
+                retries=0 if (risky or jumbo) else self.retries,
                 use_process=False,
                 retry_on_timeout=False,
             )

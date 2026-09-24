@@ -283,10 +283,14 @@ def discover_source(
         if plan_ids:
             rows = db.get_artifact_rows_for_ids(plan_ids)
             chunk_jobs: list = []
+            size_by_id: dict[int, int] = {}
             for file_row, feat_row in rows:
                 report = assess_rows(file_row, feat_row, require_disk=False)
                 report.source_id = int(source_id)
                 report.path = str(file_row.get("path") or "")
+                fid = int(file_row.get("id") or 0)
+                if fid:
+                    size_by_id[fid] = int(file_row.get("file_size") or 0)
                 chunk_jobs.extend(
                     plan_jobs_for_file(
                         report,
@@ -296,8 +300,14 @@ def discover_source(
                         patch_enabled=bool(patch_enabled),
                     )
                 )
+            from dataclasses import replace
+
             from core.ovd_index import apply_owl_queue_policy
 
+            chunk_jobs = [
+                replace(j, file_size=int(size_by_id.get(int(j.file_id), 0) or 0))
+                for j in chunk_jobs
+            ]
             chunk_jobs = apply_owl_queue_policy(
                 chunk_jobs, db=db, job_store=store, settings=settings
             )
@@ -306,6 +316,7 @@ def discover_source(
                     chunk_jobs,
                     reopen_permanent=repair,
                     reopen_done=repair,
+                    settings=settings,
                 )
                 or 0
             )
@@ -393,6 +404,7 @@ def enqueue_existing_gaps(
     after_id: int = 0,
     ocr_enabled: bool = False,
     patch_enabled: bool = True,
+    settings: Any | None = None,
 ) -> int | tuple[int, int]:
     """DB-only gap plan. limit/after_id ile chunk'lı arka plan tarama.
 
@@ -414,7 +426,14 @@ def enqueue_existing_gaps(
     max_examine = None if target is None else max(int(target) * 2, int(target))
     fetch = 300 if target is None else max(50, min(target, 300))
     while True:
-        sql = """
+        sql_with_size = """
+            SELECT id, COALESCE(file_size,0) AS file_size FROM files
+            WHERE source_id=? AND status NOT IN ('excluded_internal','missing')
+              AND id>?
+            ORDER BY id
+            LIMIT ?
+        """
+        sql_id_only = """
             SELECT id FROM files
             WHERE source_id=? AND status NOT IN ('excluded_internal','missing')
               AND id>?
@@ -422,9 +441,14 @@ def enqueue_existing_gaps(
             LIMIT ?
         """
         with db.connect() as conn:
-            rows = conn.execute(
-                sql, (int(source_id), int(last_id), int(fetch))
-            ).fetchall()
+            try:
+                rows = conn.execute(
+                    sql_with_size, (int(source_id), int(last_id), int(fetch))
+                ).fetchall()
+            except Exception:
+                rows = conn.execute(
+                    sql_id_only, (int(source_id), int(last_id), int(fetch))
+                ).fetchall()
         if not rows:
             if limit is not None:
                 return (n, 0) if n == 0 else (n, last_id)
@@ -453,8 +477,15 @@ def enqueue_existing_gaps(
                 ocr_enabled=bool(ocr_enabled),
                 patch_enabled=bool(patch_enabled),
             )
+            from dataclasses import replace
+
             from core.ovd_index import apply_owl_queue_policy
 
+            try:
+                sz = int(row["file_size"] or 0)
+            except Exception:
+                sz = 0
+            jobs = [replace(j, file_size=sz) for j in jobs]
             jobs = apply_owl_queue_policy(jobs, db=db, job_store=store)
             reconcile_stale_pendings(store, report)
             # reopen_done only for Preview/Thumbnail physical gaps — never heavy AI.
@@ -476,6 +507,7 @@ def enqueue_existing_gaps(
                         light_jobs,
                         reopen_permanent=repair,
                         reopen_done=reopen_light,
+                        settings=settings,
                     )
                     or 0
                 )
@@ -536,20 +568,40 @@ def enqueue_missing_thumbnail_jobs(
     params.append(lim)
     with db.connect() as conn:
         rows = conn.execute(sql, params).fetchall()
+        size_by_id: dict[int, int] = {}
+        try:
+            ids = [int(r["id"]) for r in rows]
+            if ids:
+                ph = ",".join("?" * len(ids))
+                for r in conn.execute(
+                    f"SELECT id, COALESCE(file_size,0) AS file_size FROM files WHERE id IN ({ph})",
+                    ids,
+                ).fetchall():
+                    size_by_id[int(r["id"])] = int(r["file_size"] or 0)
+        except Exception:
+            size_by_id = {}
     jobs: list[Job] = []
     for row in rows:
+        fid = int(row["id"])
         jobs.append(
             Job(
-                int(row["id"]),
+                fid,
                 Artifact.THUMBNAIL,
                 QueueKind.LIGHT,
                 int(row["source_id"] or 0),
                 str(row["path"] or ""),
+                file_size=int(size_by_id.get(fid, 0) or 0),
             )
         )
     if not jobs:
         return {"queued": 0, "examined": 0}
     added = int(
-        store.enqueue(jobs, reopen_permanent=False, reopen_done=True) or 0
+        store.enqueue(
+            jobs,
+            reopen_permanent=False,
+            reopen_done=True,
+            settings=None,
+        )
+        or 0
     )
     return {"queued": added, "examined": len(jobs)}

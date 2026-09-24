@@ -293,6 +293,7 @@ class BackgroundIndexScan:
                     patch_enabled=bool(
                         getattr(self.settings, "auto_patch_after_ai_final", True)
                     ),
+                    settings=self.settings,
                 )
                 self.stats.gaps_enqueued += int(n)
                 self._emit(progress_callback, source_id=sid, after_id=last_id)

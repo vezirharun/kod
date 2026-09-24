@@ -7,9 +7,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from core.index_v3.jumbo_phase import (
+    JUMBO_AVAILABLE_AT_FAR,
+    JUMBO_DEFER_MARKER,
+    is_jumbo_for_queue,
+    light_artifact_names,
+)
 from core.index_v3.timings import FileTimingStore, ensure_timing_schema
 from core.index_v3.types import Artifact, Job, JobState, QueueKind
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS index_v3_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,12 +93,28 @@ class JobStore:
             )
             conn.commit()
 
+    @staticmethod
+    def _jumbo_defer_pair(
+        job: Job, settings: Any | None
+    ) -> tuple[float, str] | None:
+        """Return (available_at, error_msg) for Phase-1 deferred jumbo light jobs."""
+        if job.artifact.value not in light_artifact_names():
+            return None
+        if not is_jumbo_for_queue(
+            str(job.path or ""),
+            int(getattr(job, "file_size", 0) or 0),
+            settings,
+        ):
+            return None
+        return float(JUMBO_AVAILABLE_AT_FAR), JUMBO_DEFER_MARKER
+
     def enqueue(
         self,
         jobs: list[Job],
         *,
         reopen_permanent: bool = False,
         reopen_done: bool = False,
+        settings: Any | None = None,
     ) -> int:
         """Insert/reopen artifact jobs idempotently.
 
@@ -101,15 +122,24 @@ class JobStore:
         raporladığı gap-reconciliation yolunda kullanılmalıdır. Böylece diskte
         silinmiş bir thumbnail/preview için eski ``done`` satırı tekrar
         çalıştırılabilir; normal keşif tamamlanmış işleri gereksiz yere açmaz.
+
+        Jumbo TIFF light jobs (``fast_tif_defer_mb``) get ``available_at=FAR``
+        so Phase-1 only claims normal FAST work.
         """
         if not jobs:
             return 0
         n = 0
         with self._lock, self._connect() as conn:
             for job in jobs:
+                defer = self._jumbo_defer_pair(job, settings)
+                avail = float(defer[0]) if defer else 0.0
+                err0 = str(defer[1]) if defer else ""
                 row = conn.execute(
                     """
-                    SELECT state, queue, COALESCE(tail_seq,0) AS tail_seq FROM index_v3_jobs
+                    SELECT state, queue, COALESCE(tail_seq,0) AS tail_seq,
+                           COALESCE(available_at,0) AS available_at,
+                           COALESCE(error_msg,'') AS error_msg
+                    FROM index_v3_jobs
                     WHERE file_id=? AND artifact=?
                     """,
                     (int(job.file_id), job.artifact.value),
@@ -125,7 +155,17 @@ class JobStore:
                         and owl_rank > 0
                         and int(row["tail_seq"] or 0) != owl_rank
                     )
-                    if state == "pending" and (queue_changed or rank_changed):
+                    need_jumbo = (
+                        state == "pending"
+                        and defer is not None
+                        and (
+                            float(row["available_at"] or 0) < JUMBO_AVAILABLE_AT_FAR
+                            or str(row["error_msg"] or "") != JUMBO_DEFER_MARKER
+                        )
+                    )
+                    if state == "pending" and (
+                        queue_changed or rank_changed or need_jumbo
+                    ):
                         conn.execute(
                             """
                             UPDATE index_v3_jobs SET
@@ -133,6 +173,8 @@ class JobStore:
                                 tail_seq=CASE
                                     WHEN ?>0 AND artifact='owlv2' THEN ?
                                     ELSE tail_seq END,
+                                available_at=CASE WHEN ? THEN ? ELSE available_at END,
+                                error_msg=CASE WHEN ? THEN ? ELSE error_msg END,
                                 updated_at=datetime('now')
                             WHERE file_id=? AND artifact=? AND state='pending'
                             """,
@@ -142,11 +184,15 @@ class JobStore:
                                 str(job.path or ""),
                                 int(owl_rank),
                                 int(owl_rank),
+                                1 if need_jumbo else 0,
+                                float(avail),
+                                1 if need_jumbo else 0,
+                                err0 or JUMBO_DEFER_MARKER,
                                 int(job.file_id),
                                 job.artifact.value,
                             ),
                         )
-                        if queue_changed:
+                        if queue_changed or need_jumbo:
                             n += 1
                     continue
                 if state == "done":
@@ -158,8 +204,8 @@ class JobStore:
                             """
                             UPDATE index_v3_jobs SET
                                 queue=?, source_id=?, path=?, state='pending',
-                                worker='', error_msg='physical_artifact_missing',
-                                available_at=0, claimed_at=0, heartbeat_at=0,
+                                worker='', error_msg=?,
+                                available_at=?, claimed_at=0, heartbeat_at=0,
                                 updated_at=datetime('now')
                             WHERE file_id=? AND artifact=? AND state='done'
                             """,
@@ -167,6 +213,8 @@ class JobStore:
                                 job.queue.value,
                                 int(job.source_id),
                                 str(job.path or ""),
+                                err0 or "physical_artifact_missing",
+                                float(avail),
                                 int(job.file_id),
                                 job.artifact.value,
                             ),
@@ -180,8 +228,8 @@ class JobStore:
                         """
                         UPDATE index_v3_jobs SET
                             queue=?, source_id=?, path=?, state='pending',
-                            worker='', error_msg='', attempts=0, tail_seq=0,
-                            available_at=0, claimed_at=0, heartbeat_at=0,
+                            worker='', error_msg=?, attempts=0, tail_seq=0,
+                            available_at=?, claimed_at=0, heartbeat_at=0,
                             updated_at=datetime('now')
                         WHERE file_id=? AND artifact=?
                         """,
@@ -189,6 +237,8 @@ class JobStore:
                             job.queue.value,
                             int(job.source_id),
                             str(job.path or ""),
+                            err0,
+                            float(avail),
                             int(job.file_id),
                             job.artifact.value,
                         ),
@@ -200,8 +250,8 @@ class JobStore:
                         """
                         UPDATE index_v3_jobs SET
                             queue=?, source_id=?, path=?, state='pending',
-                            worker='', error_msg='',
-                            available_at=0,
+                            worker='', error_msg=?,
+                            available_at=?,
                             updated_at=datetime('now')
                         WHERE file_id=? AND artifact=?
                         """,
@@ -209,6 +259,8 @@ class JobStore:
                             job.queue.value,
                             int(job.source_id),
                             str(job.path or ""),
+                            err0,
+                            float(avail),
                             int(job.file_id),
                             job.artifact.value,
                         ),
@@ -219,9 +271,10 @@ class JobStore:
                         """
                         INSERT INTO index_v3_jobs(
                             file_id, artifact, queue, source_id, path,
-                            state, updated_at, enqueued_at, tail_seq
+                            state, updated_at, enqueued_at, tail_seq,
+                            available_at, error_msg
                         ) VALUES (?,?,?,?,?,'pending', datetime('now'),
-                                  strftime('%s','now'), ?)
+                                  strftime('%s','now'), ?, ?, ?)
                         """,
                         (
                             int(job.file_id),
@@ -230,11 +283,107 @@ class JobStore:
                             int(job.source_id),
                             str(job.path or ""),
                             int(owl_rank) if job.artifact.value == "owlv2" else 0,
+                            float(avail),
+                            err0,
                         ),
                     )
                 n += 1
             conn.commit()
         return n
+
+    def count_claimable_fast_pending(
+        self,
+        *,
+        source_ids: list[int] | None = None,
+    ) -> int:
+        """Phase-1: pending LIGHT/PREVIEW with available_at <= now (normals)."""
+        self._ensure()
+        sql = """
+            SELECT COUNT(*) AS n FROM index_v3_jobs
+            WHERE state='pending'
+              AND queue IN ('light','preview')
+              AND available_at <= strftime('%s','now')
+        """
+        params: list[Any] = []
+        if source_ids:
+            sph = ",".join("?" * len(source_ids))
+            sql += f" AND source_id IN ({sph})"
+            params.extend(int(x) for x in source_ids)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row["n"] if row else 0)
+
+    def count_jumbo_deferred(
+        self,
+        *,
+        source_ids: list[int] | None = None,
+    ) -> int:
+        """Pending light jobs parked for Phase-2 (marker and/or FAR available_at)."""
+        self._ensure()
+        sql = """
+            SELECT COUNT(*) AS n FROM index_v3_jobs
+            WHERE state='pending'
+              AND queue IN ('light','preview')
+              AND (
+                error_msg=?
+                OR available_at >= ?
+              )
+        """
+        params: list[Any] = [JUMBO_DEFER_MARKER, float(JUMBO_AVAILABLE_AT_FAR)]
+        if source_ids:
+            sph = ",".join("?" * len(source_ids))
+            sql += f" AND source_id IN ({sph})"
+            params.extend(int(x) for x in source_ids)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row["n"] if row else 0)
+
+    def release_jumbo_deferred(
+        self,
+        *,
+        source_ids: list[int] | None = None,
+    ) -> int:
+        """Phase-1 complete → make jumbo light jobs claimable."""
+        self._ensure()
+        sql = """
+            UPDATE index_v3_jobs SET
+                available_at=0,
+                error_msg=CASE
+                    WHEN error_msg=? THEN ''
+                    ELSE error_msg END,
+                updated_at=datetime('now')
+            WHERE state='pending'
+              AND queue IN ('light','preview')
+              AND (
+                error_msg=?
+                OR available_at >= ?
+              )
+        """
+        params: list[Any] = [
+            JUMBO_DEFER_MARKER,
+            JUMBO_DEFER_MARKER,
+            float(JUMBO_AVAILABLE_AT_FAR),
+        ]
+        if source_ids:
+            sph = ",".join("?" * len(source_ids))
+            sql += f" AND source_id IN ({sph})"
+            params.extend(int(x) for x in source_ids)
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def maybe_release_jumbo_phase(
+        self,
+        *,
+        source_ids: list[int] | None = None,
+    ) -> int:
+        """If no claimable normal FAST work remains, release deferred jumbos."""
+        if self.count_claimable_fast_pending(source_ids=source_ids) > 0:
+            return 0
+        if self.count_jumbo_deferred(source_ids=source_ids) <= 0:
+            return 0
+        return self.release_jumbo_deferred(source_ids=source_ids)
 
     def reopen_failed_permanent(
         self,
@@ -475,8 +624,11 @@ class JobStore:
             ).fetchone()
             attempts = int(row["attempts"] if row else 0)
             tail_seq = 0
+            # Soft retry stays behind never-failed pending (tail_seq). Small
+            # available_at backoff stops a lone failing job from claim→fail spin.
+            available_at_sql = "0"
             if not permanent and attempts < max_attempts:
-                # Queue-tail retry: hemen tekrar claim edilmesin.
+                # Queue-tail retry: normal pending jobs finish first.
                 state = JobState.PENDING.value
                 tail_seq = int(
                     conn.execute(
@@ -490,15 +642,18 @@ class JobStore:
                     ).fetchone()[0]
                     or 1
                 )
+                delay = max(1, min(30, int(attempts)))
+                available_at_sql = f"(strftime('%s','now') + {delay})"
             elif not permanent and attempts >= max_attempts:
                 state = JobState.FAILED_PERMANENT.value
             conn.execute(
-                """
+                f"""
                 UPDATE index_v3_jobs SET state=?, worker='', error_msg=?,
                     last_claimed_at=CASE
                         WHEN COALESCE(last_claimed_at,0)>0 THEN last_claimed_at
                         ELSE claimed_at END,
                     claimed_at=0, heartbeat_at=0, tail_seq=?,
+                    available_at={available_at_sql},
                     updated_at=datetime('now')
                 WHERE file_id=? AND artifact=?
                 """,
