@@ -611,6 +611,36 @@ def concepts(db_path):
     c=_conn(db_path); rows=c.execute("SELECT * FROM concept_registry ORDER BY canonical").fetchall(); c.close()
     return [dict(r) for r in rows]
 
+def concepts_readonly(db_path):
+    """SELECT concept rows without CREATE/migrate — safe for UI category tree.
+
+    Falls back to ``concepts()`` (migrating writer) if the RO path is unavailable.
+    """
+    path = _write_path(db_path)
+    if not path:
+        return []
+    try:
+        from pathlib import Path as _P
+
+        if not _P(path).is_file():
+            return []
+        uri = f"file:{path}?mode=ro"
+        c = sqlite3.connect(uri, uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        try:
+            rows = c.execute(
+                "SELECT canonical, parent, status, concept_type, confidence "
+                "FROM concept_registry ORDER BY canonical"
+            ).fetchall()
+        finally:
+            c.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        try:
+            return concepts(db_path)
+        except Exception:
+            return []
+
 def set_status(db_path, concept_id, status):
     st=str(status or "active").strip().lower()
     if st in ("learned","active"): st="active"

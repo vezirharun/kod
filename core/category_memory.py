@@ -619,17 +619,20 @@ def register_category(
         return False
 
 
-def dynamic_children(db_path: str, parent: str) -> list[str]:
-    if not db_path or not parent:
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
+def all_dynamic_children_grouped(db_path: str) -> dict[str, list[str]]:
+    """One-pass load of category_memory children grouped by parent key.
+
+    Marka brand collapsing is left to callers (same as ``child_categories``).
+    """
+    if not db_path:
+        return {}
+    grouped: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
     for path in _read_db_paths(db_path):
         conn = _read_conn(path)
         if conn is None:
             continue
         try:
-            # Parent case variants included
             rows = conn.execute(
                 "SELECT parent, label FROM category_memory ORDER BY label COLLATE NOCASE"
             ).fetchall()
@@ -639,28 +642,41 @@ def dynamic_children(db_path: str, parent: str) -> list[str]:
             rows = []
         finally:
             conn.close()
-        brand_parent = parent.casefold() == "marka"
         for r in rows:
-            if _key(r["parent"]) != _key(parent):
+            pk = _key(str(r["parent"] or ""))
+            if not pk:
                 continue
-            lab = str(r["label"])
-            if brand_parent:
-                try:
-                    from core.brand_aliases import canonical_brand_display, normalize_brand_key
+            lab = str(r["label"] or "")
+            lk = _key(lab)
+            if not lab or not lk:
+                continue
+            bucket = seen.setdefault(pk, set())
+            if lk in bucket:
+                continue
+            bucket.add(lk)
+            grouped.setdefault(pk, []).append(lab)
+    return grouped
 
-                    key = normalize_brand_key(lab)
-                    if not key or key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(canonical_brand_display(lab, db_path) or lab)
+
+def dynamic_children(db_path: str, parent: str) -> list[str]:
+    if not db_path or not parent:
+        return []
+    out = list(all_dynamic_children_grouped(db_path).get(_key(parent), []))
+    if parent.casefold() == "marka":
+        try:
+            from core.brand_aliases import canonical_brand_display, normalize_brand_key
+
+            collapsed: list[str] = []
+            seen: set[str] = set()
+            for lab in out:
+                key = normalize_brand_key(lab)
+                if not key or key in seen:
                     continue
-                except Exception:
-                    pass
-            k = _key(lab)
-            if not k or k in seen:
-                continue
-            seen.add(k)
-            out.append(lab)
+                seen.add(key)
+                collapsed.append(canonical_brand_display(lab, db_path) or lab)
+            return collapsed
+        except Exception:
+            pass
     return out
 
 

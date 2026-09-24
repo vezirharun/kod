@@ -718,8 +718,9 @@ class MainWindow(QMainWindow):
             self._category_dock.setVisible(visible)
             if visible:
                 self._category_dock.raise_()
+                # Rebuild only when DB path changed or tree empty — never
+                # force refresh on every open (UI freeze: N+1 concepts()).
                 self.category_tree_panel.set_db_path(self.settings.db_path)
-                QTimer.singleShot(0, self.category_tree_panel.refresh)
         elif panel_key == "teach_me" and self._teach_me_dock:
             self._teach_me_dock.setVisible(visible)
             if visible:

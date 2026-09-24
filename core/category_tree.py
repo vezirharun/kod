@@ -773,10 +773,55 @@ def apply_auto_category_to_texture_map(
 
 
 def parent_categories(db_path: str = "") -> list[str]:
+    roots, _ = build_category_tree_hierarchy(db_path)
+    return roots
+
+
+def child_categories(parent: str, db_path: str = "") -> list[str]:
+    _, children = build_category_tree_hierarchy(db_path)
+    if parent in children:
+        return list(children[parent])
+    # Parent may be dynamic-only with different casing vs map keys.
+    from core.category_memory import _key
+
+    pk = _key(parent)
+    for name, kids in children.items():
+        if _key(name) == pk:
+            return list(kids)
+    return list(CATEGORY_TREE.get(parent, {}).keys())
+
+
+def _collapse_marka_labels(kids: list[str], db_path: str) -> list[str]:
+    try:
+        from core.brand_aliases import canonical_brand_display, normalize_brand_key
+
+        collapsed: list[str] = []
+        seen: set[str] = set()
+        for name in kids:
+            key = normalize_brand_key(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            collapsed.append(canonical_brand_display(name, db_path) or name)
+        return collapsed
+    except Exception:
+        return kids
+
+
+def build_category_tree_hierarchy(
+    db_path: str = "",
+) -> tuple[list[str], dict[str, list[str]]]:
+    """One-pass parent→children map (same merge rules as legacy helpers).
+
+    Loads ``concepts`` and ``category_memory`` at most once per call so the
+    UI panel does not pay N+1 SQLite opens across ~50 parents.
+    """
     roots = list(CATEGORY_TREE.keys())
+    concept_rows: list[dict] = []
+    dyn_by_parent: dict[str, list[str]] = {}
     if db_path:
         try:
-            from core.category_memory import _key, dynamic_parents
+            from core.category_memory import _key, all_dynamic_children_grouped, dynamic_parents
 
             seen = {_key(p) for p in roots}
             for p in dynamic_parents(db_path):
@@ -786,13 +831,13 @@ def parent_categories(db_path: str = "") -> list[str]:
                     roots.append(p)
         except Exception:
             pass
-        # concept_registry parents (taught) — safe merge, no hard-code.
         try:
             from core.category_memory import _key
-            from core.concept_registry import concepts
+            from core.concept_registry import concepts_readonly
 
+            concept_rows = list(concepts_readonly(db_path))
             seen = {_key(p) for p in roots}
-            for row in concepts(db_path):
+            for row in concept_rows:
                 status = str(row.get("status") or "active")
                 if status in ("inactive", "retired"):
                     continue
@@ -804,56 +849,38 @@ def parent_categories(db_path: str = "") -> list[str]:
                     seen.add(k)
                     roots.append(parent)
         except Exception:
-            pass
-    return roots
-
-
-def child_categories(parent: str, db_path: str = "") -> list[str]:
-    kids = list(CATEGORY_TREE.get(parent, {}).keys())
-    if db_path:
+            concept_rows = []
         try:
-            from core.category_memory import _key, dynamic_children
+            from core.category_memory import all_dynamic_children_grouped
 
-            seen = {_key(c) for c in kids}
-            for c in dynamic_children(db_path, parent):
-                k = _key(c)
-                if k and k not in seen:
-                    seen.add(k)
-                    kids.append(c)
+            dyn_by_parent = all_dynamic_children_grouped(db_path)
         except Exception:
-            pass
-        try:
-            from core.category_memory import _key
-            from core.concept_registry import concepts
+            dyn_by_parent = {}
 
-            pk = _key(parent)
-            seen = {_key(c) for c in kids}
-            for row in concepts(db_path):
-                status = str(row.get("status") or "active")
-                if status in ("inactive", "retired"):
-                    continue
-                if _key(str(row.get("parent") or "")) != pk:
-                    continue
-                can = str(row.get("canonical") or "").strip()
-                k = _key(can)
-                if can and k and k not in seen:
-                    seen.add(k)
-                    kids.append(can)
-        except Exception:
-            pass
-    if parent.casefold() == "marka":
-        try:
-            from core.brand_aliases import canonical_brand_display, normalize_brand_key
+    from core.category_memory import _key
 
-            collapsed: list[str] = []
-            seen: set[str] = set()
-            for name in kids:
-                key = normalize_brand_key(name)
-                if not key or key in seen:
-                    continue
-                seen.add(key)
-                collapsed.append(canonical_brand_display(name, db_path) or name)
-            return collapsed
-        except Exception:
-            pass
-    return kids
+    children_map: dict[str, list[str]] = {}
+    for parent in roots:
+        kids = list(CATEGORY_TREE.get(parent, {}).keys())
+        seen = {_key(c) for c in kids}
+        for c in dyn_by_parent.get(_key(parent), []):
+            k = _key(c)
+            if k and k not in seen:
+                seen.add(k)
+                kids.append(c)
+        pk = _key(parent)
+        for row in concept_rows:
+            status = str(row.get("status") or "active")
+            if status in ("inactive", "retired"):
+                continue
+            if _key(str(row.get("parent") or "")) != pk:
+                continue
+            can = str(row.get("canonical") or "").strip()
+            k = _key(can)
+            if can and k and k not in seen:
+                seen.add(k)
+                kids.append(can)
+        if parent.casefold() == "marka":
+            kids = _collapse_marka_labels(kids, db_path)
+        children_map[parent] = kids
+    return roots, children_map
