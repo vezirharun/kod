@@ -1,0 +1,45 @@
+{
+  "report_id": "result_hover_full_detail_preview_fix_20260925_145143",
+  "timestamp": "20260925_145143",
+  "commit_message": "fix: use full result detail canvas for hover preview",
+  "root_cause": "Floating ResultDetailPreviewOverlay (main-window child) created the small blue rectangle over the results list instead of using the dock LARGE_PREVIEW_CANVAS.",
+  "blue_area_widget": "ResultDetailPreviewOverlay (REMOVED)",
+  "correct_canvas": {
+    "panel": "FixedHoverPreviewPanel",
+    "object_name": "FixedHoverPreview",
+    "image_label": "lbl_image"
+  },
+  "hover_link": "results_panel.hover_preview -> MainWindow._on_hover_preview -> FixedHoverPreviewPanel.show_thumbnail",
+  "contain_fit": "scale = min(box_w/nw, box_h/nh); tw,th clamped to canvas; upscale of small thumbs allowed",
+  "selection_vs_hover": {
+    "hover": "_list_hovering temporary pixmap/caption",
+    "selection": "_selection_token/_selection_pix unchanged on hover",
+    "leave": "_restore_selection()"
+  },
+  "geometry": {
+    "detail_dock_unchanged": true,
+    "main_window_unchanged": true,
+    "preview_panel_geometry_unchanged": true
+  },
+  "files_changed": [
+    "ui/fixed_hover_preview.py",
+    "tests/test_result_hover_full_detail_preview.py",
+    "tests/test_result_detail_hover_magnify.py",
+    "tests/test_result_detail_dual_preview.py"
+  ],
+  "tests": {
+    "passed": 17,
+    "failed": 0,
+    "suite": "test_result_hover_full_detail_preview.py (+ retired overlay stubs + large_preview)"
+  },
+  "real_ui": {
+    "platform": "Windows Qt QMainWindow + InspectorDock",
+    "floating_overlay_gone": true,
+    "full_canvas_list_hover": true,
+    "no_external_file_open": true
+  },
+  "acceptance": {
+    "list_hover_fills_red_canvas": true,
+    "no_blue_floating_rectangle": true
+  }
+}
