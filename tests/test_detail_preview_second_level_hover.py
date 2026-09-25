@@ -73,17 +73,16 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
 
         win, dock, content = self._docked()
         p = content.hover_preview
-        p.set_selection_pixmap(_pix(400, 200), file_id=2, filename="a.jpg")
+        p.set_selection_pixmap(_pix(1024, 512), file_id=2, filename="a.jpg")
         self._app.processEvents()
-        canvas_w = max(1, p.lbl_image.width())
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
         self.assertTrue(p._overlay_visible)
-        self.assertGreater(p._overlay.width(), canvas_w)
-        ov_pm = p._overlay.lbl_image.pixmap()
-        self.assertIsNotNone(ov_pm)
-        self.assertFalse(ov_pm.isNull())
-        self.assertGreater(ov_pm.width(), 200)
+        # In-canvas overlay: same geometry as lbl_image; hi-res source.
+        self.assertEqual(p._overlay.geometry(), p.lbl_image.geometry())
+        used = p._overlay_source_pix()
+        self.assertGreaterEqual(used.width(), 512)
+
 
     def test_detail_preview_hover_does_not_resize_normal_preview(self):
         from PySide6.QtCore import QPointF
@@ -171,16 +170,17 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         self.assertNotIn("self._apply_fit_image", src)
 
     def test_detail_preview_hover_preserves_aspect_ratio(self):
-        from PySide6.QtCore import QRect
-
-        from ui.fixed_hover_preview import DetailPreviewHoverOverlay
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QEnterEvent
 
         win, dock, content = self._docked()
-        ov = DetailPreviewHoverOverlay(content.hover_preview, win)
-        tw, th = ov.set_pixmap_contain(_pix(1600, 400), QRect(0, 0, 700, 500))
-        self.assertLessEqual(tw, 700)
-        self.assertLessEqual(th, 500)
-        self.assertAlmostEqual(tw / max(th, 1), 4.0, delta=0.08)
+        p = content.hover_preview
+        p.set_selection_pixmap(_pix(1600, 400), file_id=8, filename="wide.jpg")
+        self._app.processEvents()
+        p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+        self._app.processEvents()
+        pm = p._overlay.lbl_image.pixmap()
+        self.assertAlmostEqual(pm.width() / max(pm.height(), 1), 4.0, delta=0.1)
 
     def test_list_hover_still_uses_canvas_not_only_overlay(self):
         """STATE 2 must still paint into the dock canvas."""

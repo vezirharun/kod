@@ -4,35 +4,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QRect, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
-    QMainWindow,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ui.theme import COLOR_BG, COLOR_BORDER, COLOR_SURFACE, configure_dock_scroll_area
+from ui.theme import COLOR_BG, COLOR_BORDER, configure_dock_scroll_area
 
 # Dock canvas contain-fit (liste hover + selection). Overlay ayrı katman.
 _CANVAS_FILL = 1.0
 
 
-def _find_main_window(widget: QWidget | None) -> QMainWindow | None:
-    w = widget
-    while w is not None:
-        if isinstance(w, QMainWindow):
-            return w
-        w = w.parentWidget()
-    return None
-
-
 class DetailPreviewHoverOverlay(QFrame):
-    """Ana pencere floating magnify — normal preview geometry'sine dokunmaz."""
+    """Preview canvas içinde hover katmanı — ana pencere floating değil."""
 
     def __init__(self, host: "FixedHoverPreviewPanel", parent: QWidget):
         super().__init__(parent)
@@ -43,13 +33,13 @@ class DetailPreviewHoverOverlay(QFrame):
         self.hide()
         self.setStyleSheet(
             f"QFrame#DetailPreviewHoverOverlay {{"
-            f"background:{COLOR_SURFACE};"
+            f"background:{COLOR_BG};"
             f"border:1px solid {COLOR_BORDER};"
             f"border-radius:6px;"
             f"}}"
         )
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setContentsMargins(0, 0, 0, 0)
         self.lbl_image = QLabel()
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_image.setMinimumSize(0, 0)
@@ -68,18 +58,18 @@ class DetailPreviewHoverOverlay(QFrame):
         super().leaveEvent(event)
         self._host._overlay_zone_leave()
 
-    def set_pixmap_contain(self, pix: QPixmap, box: QRect) -> tuple[int, int]:
-        """Contain-fit into max box; return display size (no file open)."""
-        if pix.isNull() or box.width() < 32 or box.height() < 32:
+    def paint_contain(self, pix: QPixmap) -> tuple[int, int]:
+        """Contain-fit into this overlay (already sized to canvas). Cap upscale at 1.0."""
+        if pix.isNull() or self.width() < 8 or self.height() < 8:
             self.hide()
             return (0, 0)
-        pad = 16
-        aw = max(1, box.width() - pad)
-        ah = max(1, box.height() - pad)
+        aw = max(1, self.width() - 4)
+        ah = max(1, self.height() - 4)
         nw, nh = int(pix.width()), int(pix.height())
-        scale = min(aw / max(nw, 1), ah / max(nh, 1))
-        tw = max(1, min(aw, int(nw * scale)))
-        th = max(1, min(ah, int(nh * scale)))
+        # Do not blow up low-res thumbs beyond native pixels.
+        scale = min(1.0, aw / max(nw, 1), ah / max(nh, 1))
+        tw = max(1, int(nw * scale))
+        th = max(1, int(nh * scale))
         self.lbl_image.setPixmap(
             pix.scaled(
                 tw,
@@ -88,17 +78,17 @@ class DetailPreviewHoverOverlay(QFrame):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
-        self.setFixedSize(tw + 16, th + 16)
         return tw, th
 
 
 class FixedHoverPreviewPanel(QFrame):
-    """Sağ dock LARGE_PREVIEW_CANVAS + detail-hover magnify overlay.
+    """Sağ dock LARGE_PREVIEW_CANVAS + in-canvas hover overlay.
 
     STATE 1: selection/normal canvas
     STATE 2: liste hover → aynı canvas (selection değişmez)
-    STATE 3: canvas hover → ayrı DetailPreviewHoverOverlay (canvas geometry sabit)
+    STATE 3: canvas hover → DetailPreviewHoverOverlay = lbl_image geometry (hi-res)
     """
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -344,83 +334,61 @@ class FixedHoverPreviewPanel(QFrame):
             self.clear_selection()
 
     def _overlay_source_pix(self) -> QPixmap | None:
-        """Currently displayed preview (list hover or selection)."""
-        pix = self._source_pix
-        if pix is not None and not pix.isNull():
-            return pix
-        if self._selection_pix is not None and not self._selection_pix.isNull():
-            return self._selection_pix
-        return None
+        """Highest-resolution cached preview available (no NAS/original open)."""
+        candidates: list[QPixmap] = []
+        for pix in (self._selection_pix, self._source_pix):
+            if pix is not None and not pix.isNull():
+                candidates.append(pix)
+        # Prefer FeaturePreview / detail cache over list thumb when available.
+        try:
+            from ui.thumbnail_scheduler import get_thumbnail_scheduler
+
+            sched = get_thumbnail_scheduler()
+            for fid in (self._selection_token, self._hover_token):
+                if not fid:
+                    continue
+                img = sched.peek_detail_image(int(fid))
+                if img is not None and not img.isNull():
+                    px = QPixmap.fromImage(img)
+                    if not px.isNull():
+                        candidates.append(px)
+                img2 = sched.peek_image(int(fid))
+                if img2 is not None and not img2.isNull():
+                    px2 = QPixmap.fromImage(img2)
+                    if not px2.isNull():
+                        candidates.append(px2)
+        except Exception:
+            pass
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: int(p.width()) * int(p.height()))
 
     def _ensure_overlay(self) -> DetailPreviewHoverOverlay | None:
         if self._overlay is not None:
             return self._overlay
-        mw = _find_main_window(self)
-        if mw is None:
-            return None
-        self._overlay = DetailPreviewHoverOverlay(self, mw)
+        # Parent = this panel (preview viewport), NOT main window.
+        self._overlay = DetailPreviewHoverOverlay(self, self)
         return self._overlay
 
-    def _overlay_anchor_and_box(self) -> tuple[QPoint, QRect] | None:
-        mw = _find_main_window(self)
-        if mw is None:
-            return None
-        client = mw.rect()
-        central = mw.centralWidget()
-        if central is not None:
-            top_left = central.mapTo(mw, QPoint(0, 0))
-            client = QRect(top_left, central.size())
-        anchor = self.mapTo(mw, QPoint(0, 0))
-        return anchor, client
-
-    def _compute_overlay_geometry(self, fw: int, fh: int) -> QRect | None:
-        placed = self._overlay_anchor_and_box()
-        if placed is None:
-            return None
-        anchor, client = placed
-        gap = 8
-        # Prefer LEFT of normal preview (over results); never grow the dock.
-        x = anchor.x() - fw - gap
-        y = anchor.y()
-        if x < client.left() + gap:
-            x = client.left() + gap
-        if y < client.top() + gap:
-            y = client.top() + gap
-        if x + fw > client.right() - gap:
-            x = max(client.left() + gap, client.right() - gap - fw)
-        if y + fh > client.bottom() - gap:
-            y = max(client.top() + gap, client.bottom() - gap - fh)
-        x = min(max(x, client.left()), max(client.left(), client.right() - fw))
-        y = min(max(y, client.top()), max(client.top(), client.bottom() - fh))
-        return QRect(x, y, fw, fh)
+    def _canvas_rect(self) -> QRect:
+        """Red-area geometry: lbl_image in panel coordinates."""
+        return QRect(self.lbl_image.geometry())
 
     def _show_overlay(self) -> None:
-        """STATE 3 — large overlay only; normal canvas geometry untouched."""
+        """STATE 3 — paint hi-res preview inside the Result Detail canvas only."""
         pix = self._overlay_source_pix()
         if pix is None or pix.isNull():
             return
         overlay = self._ensure_overlay()
         if overlay is None:
             return
-        placed = self._overlay_anchor_and_box()
-        if placed is None:
-            return
-        anchor, client = placed
-        gap = 8
-        space_left = max(0, anchor.x() - client.left() - gap * 2)
-        # Prefer space left of preview; if dock-only / cramped, use most of main window.
-        max_w = max(space_left, int(client.width() * 0.55), 240)
-        max_h = max(160, int(client.height() * 0.70))
-        max_w = min(max_w, max(160, client.width() - 16))
-        max_h = min(max_h, max(160, client.height() - 16))
-        tw, th = overlay.set_pixmap_contain(pix, QRect(0, 0, max_w, max_h))
-        if tw <= 0:
-            return
-        fw, fh = overlay.width(), overlay.height()
-        geo = self._compute_overlay_geometry(fw, fh)
-        if geo is None:
+        geo = self._canvas_rect()
+        if geo.width() < 32 or geo.height() < 32:
             return
         overlay.setGeometry(geo)
+        tw, th = overlay.paint_contain(pix)
+        if tw <= 0:
+            return
         overlay.raise_()
         overlay.show()
         self._overlay_visible = True
@@ -445,7 +413,7 @@ class FixedHoverPreviewPanel(QFrame):
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
-        # Delay: mouse may move onto large overlay (hover zone).
+        # Delay: mouse may move onto in-canvas overlay (hover zone).
         self._overlay_hide_timer.start()
 
     def resizeEvent(self, event) -> None:  # noqa: N802

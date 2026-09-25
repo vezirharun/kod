@@ -1,0 +1,23 @@
+{
+  "report_id": "detail_hover_preview_position_resolution_fix_20260925_152242",
+  "timestamp": "20260925_152242",
+  "commit_message": "fix: align detail hover preview and use high resolution source",
+  "root_cause": {
+    "wrong_parent": "QMainWindow",
+    "wrong_geometry": "central-widget placement left-of-dock then clamp to center",
+    "pixelation": "low-res _source_pix upscaled into large central overlay box; FeaturePreview/detail cache unused"
+  },
+  "correct_viewport": "FixedHoverPreviewPanel.lbl_image (Result Detail preview canvas)",
+  "fix": {
+    "parent": "FixedHoverPreviewPanel",
+    "geometry": "lbl_image.geometry()",
+    "source": "max(selection_pix, source_pix, peek_detail_image, peek_image)",
+    "scale": "contain-fit, upscale capped at 1.0"
+  },
+  "tests": {"passed": 28, "failed": 0},
+  "files_changed": [
+    "ui/fixed_hover_preview.py",
+    "tests/test_detail_hover_position_resolution.py",
+    "tests/test_detail_preview_second_level_hover.py"
+  ]
+}
