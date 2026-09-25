@@ -26,24 +26,19 @@ class TestResultDetailResponsive(unittest.TestCase):
         from PySide6.QtWidgets import QDockWidget, QMainWindow
 
         from ui.fixed_hover_preview import InspectorDockContent
-        from ui.main_window import MainWindow
 
         win = QMainWindow()
         content = InspectorDockContent()
-        scroll = MainWindow._scrollable_panel(content, horizontal=False)
         dock = QDockWidget("Sonuç Detayı", win)
-        dock.setWidget(scroll)
-        win.addDockWidget(
-            __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.DockWidgetArea.RightDockWidgetArea,
-            dock,
-        )
+        dock.setWidget(content)
+        win.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         win.resize(1200, 800)
         win.show()
         dock.show()
         self._app.processEvents()
 
         self.assertEqual(
-            scroll.horizontalScrollBarPolicy(),
+            content.detail_scroll.horizontalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
         )
         self.assertEqual(
@@ -114,15 +109,13 @@ class TestResultDetailResponsive(unittest.TestCase):
         from PySide6.QtWidgets import QDockWidget, QMainWindow
 
         from ui.fixed_hover_preview import InspectorDockContent
-        from ui.main_window import MainWindow
 
         win = QMainWindow()
         win.resize(1280, 800)
         content = InspectorDockContent()
-        scroll = MainWindow._scrollable_panel(content, horizontal=False)
         dock = QDockWidget("Sonuç Detayı", win)
         dock.setObjectName("InspectorDock")
-        dock.setWidget(scroll)
+        dock.setWidget(content)
         win.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         win.show()
 
@@ -133,11 +126,10 @@ class TestResultDetailResponsive(unittest.TestCase):
             dock.show()
             self._app.processEvents()
             self.assertEqual(
-                scroll.horizontalScrollBarPolicy(),
+                content.detail_scroll.horizontalScrollBarPolicy(),
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
             )
-            self.assertGreater(scroll.viewport().width(), 0)
-            # Buttons still present / not deleted
+            self.assertTrue(content.hover_preview.isVisible())
             for btn in (
                 content.inspector_panel.btn_folder,
                 content.inspector_panel.btn_file,

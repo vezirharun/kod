@@ -118,6 +118,7 @@ class InspectorPanel(QWidget):
         self._db_path: str = ""
         self._rel_gen: int = 0
         self._detail_source_pix: QPixmap | None = None
+        self._preview_host = None
         self.setMinimumWidth(0)
         self.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
@@ -128,6 +129,10 @@ class InspectorPanel(QWidget):
         sched = get_thumbnail_scheduler()
         sched.thumbnail_ready.connect(self._on_scheduler_thumb)
         sched.thumbnail_failed.connect(self._on_scheduler_thumb_failed)
+
+    def set_preview_host(self, host) -> None:
+        """Upper dock canvas for the large selection preview (no in-tab duplicate)."""
+        self._preview_host = host
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -142,16 +147,12 @@ class InspectorPanel(QWidget):
         )
         prev_l = QVBoxLayout(self.tab_preview)
         prev_l.setContentsMargins(0, 0, 0, 0)
+        # Large image lives in FixedHoverPreviewPanel (dock top). Keep a hidden
+        # fallback label for unit tests without a preview host.
         self.thumb = QLabel()
-        self.thumb.setMinimumSize(0, 160)
-        self.thumb.setMaximumHeight(520)
-        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        self.thumb.setStyleSheet(
-            "background:#232a35;border:1px solid #2a3340;border-radius:6px;color:#7c8698;"
-        )
+        self.thumb.hide()
+        self.thumb.setMinimumSize(0, 1)
+        self.thumb.setMaximumHeight(1)
         self._detail_native_size: tuple[int, int] = (0, 0)
         self.lbl_preview_name = QLabel("—")
         self.lbl_preview_name.setWordWrap(True)
@@ -165,7 +166,6 @@ class InspectorPanel(QWidget):
         self.lbl_preview_src.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        prev_l.addWidget(self.thumb)
         prev_l.addWidget(self.lbl_preview_name)
         prev_l.addWidget(self.lbl_preview_src)
 
@@ -371,6 +371,8 @@ class InspectorPanel(QWidget):
     def _clear_inspector(self) -> None:
         self._detail_source_pix = None
         self.thumb.clear()
+        if self._preview_host is not None:
+            self._preview_host.clear_selection()
         self.lbl_preview_name.setText("Sonuç seçin…")
         self.lbl_preview_src.setText("")
         self.lbl_ai_prediction.setText("Kararsız")
@@ -525,6 +527,10 @@ class InspectorPanel(QWidget):
 
         sched = get_thumbnail_scheduler()
         fid = int(result.file_id)
+        if self._preview_host is not None:
+            self._preview_host.set_selection_pending(
+                fid, str(result.filename or "")
+            )
         soft_placeholder = (
             "background:#232a35;border:1px solid #2a3340;border-radius:6px;"
             "color:#7c8698;font-size:13px;"
@@ -1044,11 +1050,16 @@ class InspectorPanel(QWidget):
     def _on_scheduler_thumb_failed(self, file_id: int, filename: str, reason: str) -> None:
         if not self._result or int(self._result.file_id) != int(file_id):
             return
+        tip = f"FAIL\nDosya: {filename or self._result.filename}\nSebep: ☒ {reason}"
         self.thumb.clear()
         self.thumb.setText("!")
-        self.thumb.setToolTip(
-            f"FAIL\nDosya: {filename or self._result.filename}\nSebep: ☒ {reason}"
-        )
+        self.thumb.setToolTip(tip)
+        if self._preview_host is not None:
+            self._preview_host.set_selection_failed(
+                int(file_id),
+                str(filename or self._result.filename or ""),
+                tip,
+            )
 
     def _on_scheduler_thumb(self, file_id: int, image, size: int) -> None:
         if not self._result or int(self._result.file_id) != int(file_id):
@@ -1057,17 +1068,11 @@ class InspectorPanel(QWidget):
         if int(size or 0) < 768:
             return
         if image is None:
-            self.thumb.setText("!")
-            self.thumb.setToolTip(
-                f"FAIL\nDosya: {self._result.filename}\nSebep: ☒ Decode başarısız"
-            )
+            self._on_scheduler_thumb_failed(file_id, self._result.filename, "Decode başarısız")
             return
         pix = QPixmap.fromImage(image)
         if pix.isNull():
-            self.thumb.setText("!")
-            self.thumb.setToolTip(
-                f"FAIL\nDosya: {self._result.filename}\nSebep: ☒ Decode başarısız"
-            )
+            self._on_scheduler_thumb_failed(file_id, self._result.filename, "Decode başarısız")
             return
         nw, nh = int(pix.width()), int(pix.height())
         self._detail_native_size = (nw, nh)
@@ -1079,12 +1084,13 @@ class InspectorPanel(QWidget):
         except Exception:
             meta = {}
         path = str((meta or {}).get("path") or "")
-        self.thumb.setToolTip(
+        tip = (
             f"{self._result.filename}\n"
             f"Detail preview: {nw}×{nh}px"
             + (f"\n{path}" if path else "")
         )
-        tw, th = self._apply_fit_preview(pix, smooth=True)
+        self.thumb.setToolTip(tip)
+        tw, th = self._apply_fit_preview(pix, smooth=True, tooltip=tip)
         logger_msg = f"RESULT_DETAIL file_id={file_id} display={tw}x{th} native={nw}x{nh}"
         try:
             from core.logger import setup_logger
@@ -1094,15 +1100,26 @@ class InspectorPanel(QWidget):
             pass
 
     def _preview_avail_width(self) -> int:
-        """Usable width inside the preview scroll viewport (never expands the panel)."""
+        """Usable width for text caps / fallback fit (never expands the panel)."""
         widths: list[int] = []
+        host = self._preview_host
+        if host is not None:
+            try:
+                hw = int(host.width() or 0)
+                if hw > 1:
+                    widths.append(hw)
+                if hasattr(host, "lbl_image"):
+                    iw = int(host.lbl_image.width() or 0)
+                    if iw > 1:
+                        widths.append(iw)
+            except Exception:
+                pass
         try:
             vp = self.preview_scroll.viewport()
             if vp is not None and int(vp.width()) > 1:
                 widths.append(int(vp.width()))
         except Exception:
             pass
-        # Walk parents: dock QScrollArea viewport is the hard horizontal bound.
         try:
             p = self.parent()
             while p is not None:
@@ -1115,7 +1132,6 @@ class InspectorPanel(QWidget):
             pass
         for w in (
             int(self.tab_preview.width() or 0),
-            int(self.thumb.width() or 0),
             int(self.width() or 0),
         ):
             if w > 1:
@@ -1125,10 +1141,15 @@ class InspectorPanel(QWidget):
         return max(1, min(widths) - 8)
 
     def _preview_avail_height(self) -> int:
-        h = int(self.thumb.height() or 0)
-        if h <= 1:
-            h = 360
-        return max(120, min(520, h))
+        host = self._preview_host
+        if host is not None:
+            try:
+                h = int(host.lbl_image.height() or host.height() or 0)
+                if h > 1:
+                    return max(120, h)
+            except Exception:
+                pass
+        return 360
 
     def _constrain_text_widths(self) -> None:
         """Cap label max width so long filenames cannot force horizontal overflow."""
@@ -1144,17 +1165,27 @@ class InspectorPanel(QWidget):
             lbl.setMaximumWidth(w)
 
     def _apply_fit_preview(
-        self, pix: QPixmap, *, smooth: bool = True
+        self, pix: QPixmap, *, smooth: bool = True, tooltip: str = ""
     ) -> tuple[int, int]:
-        """Contain-fit preview into available panel width; never force panel wider."""
+        """Contain-fit into the upper main preview host (or hidden fallback)."""
         if pix.isNull():
             return (0, 0)
         self._constrain_text_widths()
         self._detail_source_pix = QPixmap(pix)
+        host = self._preview_host
+        if host is not None:
+            fid = int(self._result.file_id) if self._result else 0
+            name = str(self._result.filename or "") if self._result else ""
+            return host.set_selection_pixmap(
+                pix,
+                file_id=fid,
+                filename=name,
+                tooltip=tooltip or self.thumb.toolTip(),
+                smooth=smooth,
+            )
         nw, nh = int(pix.width()), int(pix.height())
         box_w = self._preview_avail_width()
         box_h = self._preview_avail_height()
-        # Do not upscale above native; do not use floors that expand the layout.
         scale = min(1.0, box_w / max(nw, 1), box_h / max(nh, 1))
         tw = max(1, int(nw * scale))
         th = max(1, int(nh * scale))
@@ -1172,5 +1203,7 @@ class InspectorPanel(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._constrain_text_widths()
-        if self._detail_source_pix is not None and not self._detail_source_pix.isNull():
-            self._apply_fit_preview(self._detail_source_pix, smooth=True)
+        # Host handles its own resize; only refit fallback thumb when no host.
+        if self._preview_host is None and self._detail_source_pix is not None:
+            if not self._detail_source_pix.isNull():
+                self._apply_fit_preview(self._detail_source_pix, smooth=True)

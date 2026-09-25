@@ -23,9 +23,15 @@ class CategoryTreePanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        from PySide6.QtWidgets import QSizePolicy
+
         self._active_path = ""
         self._db_path = ""
         self._tree_source_mtime = 0.0
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
         self._build_ui()
         self._populate_tree()
 
@@ -89,6 +95,9 @@ class CategoryTreePanel(QWidget):
         layout.addLayout(row)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
+        self.tree.setMinimumWidth(0)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.tree.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.tree, stretch=1)
         self.lbl_active = QLabel("Aktif: Tümü")

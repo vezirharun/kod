@@ -497,10 +497,8 @@ class MainWindow(QMainWindow):
         self._inspector_dock = QDockWidget("Sonuç Detayı", self)
 
         self._inspector_dock.setObjectName("InspectorDock")
-        # No horizontal scrollbar — detail content wraps/fits; vertical scroll only.
-        self._inspector_dock.setWidget(
-            self._scrollable_panel(self._inspector_content, horizontal=False)
-        )
+        # Sticky top main preview + inner detail scroll (no outer h-scroll).
+        self._inspector_dock.setWidget(self._inspector_content)
         self._configure_dock(self._inspector_dock, minimum_width=280)
         self._inspector_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
 
@@ -526,7 +524,9 @@ class MainWindow(QMainWindow):
         self.category_tree_panel.set_db_path(self.settings.db_path)
         self._category_dock = QDockWidget("Kategori Filtresi", self)
         self._category_dock.setObjectName("CategoryTreeDock")
-        self._category_dock.setWidget(self._scrollable_panel(self.category_tree_panel))
+        self._category_dock.setWidget(
+            self._scrollable_panel(self.category_tree_panel, horizontal=False)
+        )
         self._configure_dock(self._category_dock, minimum_width=240)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._category_dock)
 

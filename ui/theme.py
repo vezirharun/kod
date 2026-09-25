@@ -133,6 +133,20 @@ QTableWidget {{
     background: {COLOR_SURFACE};
     alternate-background-color: #20252e;
 }}
+QTreeWidget, QTreeView {{
+    background: {COLOR_SURFACE};
+    color: {COLOR_FG};
+    border: 1px solid {COLOR_BORDER};
+    outline: none;
+}}
+QTreeWidget::item, QTreeView::item {{
+    color: {COLOR_FG};
+    padding: 2px 4px;
+}}
+QTreeWidget::item:selected, QTreeView::item:selected {{
+    background: #2a3340;
+    color: #ffffff;
+}}
 QHeaderView::section {{
     background: #2a3340;
     padding: 6px;
