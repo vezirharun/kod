@@ -2,116 +2,176 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication, QScrollArea
 
-APP_STYLESHEET = """
-QMainWindow, QWidget {
-    background-color: #1a1d23;
-    color: #e8eaed;
+# Shared surface tokens (keep dock/scroll fills aligned with APP_STYLESHEET).
+COLOR_BG = "#1a1d23"
+COLOR_SURFACE = "#1c2129"
+COLOR_FG = "#e8eaed"
+COLOR_MUTED = "#94a3b8"
+COLOR_BORDER = "#252b36"
+
+APP_STYLESHEET = f"""
+QMainWindow, QWidget {{
+    background-color: {COLOR_BG};
+    color: {COLOR_FG};
     font-family: "Segoe UI", sans-serif;
     font-size: 13px;
-}
-QTabWidget::pane {
-    border: 1px solid #252b36;
+}}
+QDockWidget {{
+    color: {COLOR_FG};
+    background-color: {COLOR_BG};
+    border: 1px solid {COLOR_BORDER};
+}}
+QDockWidget::title {{
+    background: {COLOR_SURFACE};
+    color: {COLOR_MUTED};
+    padding: 6px 8px;
+    border-bottom: 1px solid {COLOR_BORDER};
+}}
+QDockWidget > QWidget {{
+    background-color: {COLOR_BG};
+    color: {COLOR_FG};
+}}
+QTabWidget::pane {{
+    border: 1px solid {COLOR_BORDER};
     border-radius: 4px;
-    background: #1c2129;
-}
-QTabBar::tab {
+    background: {COLOR_SURFACE};
+}}
+QTabBar::tab {{
     background: #222730;
     color: #b0b8c4;
     padding: 7px 12px;
     margin-right: 2px;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
-}
-QTabBar::tab:selected {
+}}
+QTabBar::tab:selected {{
     background: #2a3340;
     color: #ffffff;
     font-weight: bold;
-}
-QGroupBox {
-    border: 1px solid #252b36;
+}}
+QGroupBox {{
+    border: 1px solid {COLOR_BORDER};
     border-radius: 5px;
     margin-top: 8px;
     padding-top: 10px;
     font-weight: 600;
-}
-QGroupBox::title {
+}}
+QGroupBox::title {{
     subcontrol-origin: margin;
     left: 10px;
     padding: 0 6px;
-    color: #94a3b8;
-}
-QPushButton {
+    color: {COLOR_MUTED};
+}}
+QPushButton {{
     background-color: #2a3340;
     border: 1px solid #343d4c;
     border-radius: 4px;
     padding: 5px 11px;
     min-height: 26px;
-}
-QPushButton:hover {
+}}
+QPushButton:hover {{
     background-color: #343d4c;
-}
-QPushButton:pressed {
+}}
+QPushButton:pressed {{
     background-color: #1f2630;
-}
-QPushButton#primaryBtn {
+}}
+QPushButton#primaryBtn {{
     background-color: #2563eb;
     border-color: #3b82f6;
     font-weight: bold;
-}
-QPushButton#dangerBtn {
+}}
+QPushButton#dangerBtn {{
     background-color: #7f1d1d;
     border-color: #991b1b;
-}
-QLineEdit, QComboBox {
+}}
+QLineEdit, QComboBox {{
     background: #222730;
     border: 1px solid #343d4c;
     border-radius: 4px;
     padding: 5px 8px;
     min-height: 26px;
-}
-QSlider::groove:horizontal {
+}}
+QSlider::groove:horizontal {{
     height: 6px;
     background: #343d4c;
     border-radius: 3px;
-}
-QSlider::handle:horizontal {
+}}
+QSlider::handle:horizontal {{
     width: 14px;
     margin: -4px 0;
     background: #60a5fa;
     border-radius: 7px;
-}
-QScrollArea {
+}}
+QScrollArea {{
     border: none;
-    background: transparent;
-}
-QSplitter::handle {
-    background: #252b36;
+    background-color: {COLOR_BG};
+}}
+QScrollArea > QWidget {{
+    background-color: {COLOR_BG};
+    color: {COLOR_FG};
+}}
+QSplitter::handle {{
+    background: {COLOR_BORDER};
     width: 3px;
     height: 3px;
-}
-QProgressBar {
+}}
+QProgressBar {{
     border: 1px solid #343d4c;
     border-radius: 4px;
     text-align: center;
     background: #222730;
-}
-QProgressBar::chunk {
+}}
+QProgressBar::chunk {{
     background: #2563eb;
     border-radius: 3px;
-}
-QTableWidget {
-    gridline-color: #252b36;
-    background: #1c2129;
+}}
+QTableWidget {{
+    gridline-color: {COLOR_BORDER};
+    background: {COLOR_SURFACE};
     alternate-background-color: #20252e;
-}
-QHeaderView::section {
+}}
+QHeaderView::section {{
     background: #2a3340;
     padding: 6px;
     border: none;
-}
+}}
 """
+
+
+def configure_dock_scroll_area(scroll: QScrollArea) -> None:
+    """Opaque scroll/viewport fill so floating docks never show a blank white client."""
+    bg = QColor(COLOR_BG)
+    surface = QColor(COLOR_SURFACE)
+    fg = QColor(COLOR_FG)
+
+    scroll.setAutoFillBackground(True)
+    spal = scroll.palette()
+    spal.setColor(QPalette.ColorRole.Window, bg)
+    spal.setColor(QPalette.ColorRole.Base, surface)
+    spal.setColor(QPalette.ColorRole.WindowText, fg)
+    spal.setColor(QPalette.ColorRole.Text, fg)
+    scroll.setPalette(spal)
+
+    vp = scroll.viewport()
+    if vp is not None:
+        vp.setAutoFillBackground(True)
+        vpal = vp.palette()
+        vpal.setColor(QPalette.ColorRole.Window, bg)
+        vpal.setColor(QPalette.ColorRole.Base, surface)
+        vpal.setColor(QPalette.ColorRole.WindowText, fg)
+        vpal.setColor(QPalette.ColorRole.Text, fg)
+        vp.setPalette(vpal)
+
+    child = scroll.widget()
+    if child is not None:
+        child.setAutoFillBackground(True)
+        cpal = child.palette()
+        cpal.setColor(QPalette.ColorRole.Window, bg)
+        cpal.setColor(QPalette.ColorRole.WindowText, fg)
+        child.setPalette(cpal)
 
 CLUSTER_BADGE_LABELS = {
     "exact_same": "Aynı",

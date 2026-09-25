@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtWidgets import QDockWidget, QMainWindow, QSplitter
+from PySide6.QtWidgets import QDockWidget, QMainWindow, QScrollArea, QSplitter
 
 _MIN_SPLITTER_TOTAL = 120
+_MIN_FLOAT_W = 320
+_MIN_FLOAT_H = 240
+_MIN_DOCKED_CONTENT_H = 120
 
 _DEFAULT_CONTENT = [420, 520]
 _DEFAULT_QUERY_DETAIL = [900, 420]
@@ -125,6 +128,39 @@ def restore_layout(settings, window: QMainWindow) -> None:
         content.setSizes(list(_DEFAULT_CONTENT))
     if query_detail and not _valid_sizes(query_detail.sizes(), min_each=240):
         query_detail.setSizes(list(_DEFAULT_QUERY_DETAIL))
+
+    sanitize_dock_shell(window)
+
+
+def sanitize_dock_shell(window: QMainWindow) -> None:
+    """After restoreState: opaque scroll fills + floor tiny floating geometries.
+
+    Preserves floating vs docked preference; only repairs blank-client / tiny sizes.
+    """
+    from ui.theme import configure_dock_scroll_area
+
+    for dock in window.findChildren(QDockWidget):
+        content = dock.widget()
+        if isinstance(content, QScrollArea):
+            configure_dock_scroll_area(content)
+
+        if dock.isFloating():
+            w = max(int(dock.width()), _MIN_FLOAT_W)
+            h = max(int(dock.height()), _MIN_FLOAT_H)
+            if w != dock.width() or h != dock.height():
+                dock.resize(w, h)
+            continue
+
+        # Docked: if the scroll client collapsed to a near-zero strip, nudge height.
+        if isinstance(content, QScrollArea) and content.isVisible():
+            vh = int(content.viewport().height()) if content.viewport() else 0
+            if 0 < vh < _MIN_DOCKED_CONTENT_H and dock.isVisible():
+                try:
+                    window.resizeDocks(
+                        [dock], [_MIN_DOCKED_CONTENT_H + 40], Qt.Orientation.Vertical
+                    )
+                except Exception:
+                    pass
 
 
 def save_layout(settings, window: QMainWindow) -> None:

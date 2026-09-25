@@ -580,11 +580,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _scrollable_panel(widget: QWidget) -> QScrollArea:
+        from ui.theme import configure_dock_scroll_area
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(widget)
+        configure_dock_scroll_area(scroll)
         return scroll
 
     @staticmethod
@@ -708,7 +711,8 @@ class MainWindow(QMainWindow):
             self._format_dock.setVisible(visible)
             if visible:
                 self._format_dock.raise_()
-                QTimer.singleShot(0, self.format_status_panel.refresh)
+                # Do not force audit_format_counts on every open (UI stall ~8-11s).
+                # Existing rows stay; Yenile / set_db_path refresh on demand.
         elif panel_key == "health" and self._health_dock:
             self._health_dock.setVisible(visible)
             if visible:
