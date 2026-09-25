@@ -368,21 +368,25 @@ class FixedHoverPreviewPanel(QFrame):
         if placed is None:
             return None
         anchor, client = placed
-        margin = 8
-        # Place to the LEFT of the preview panel (over results list).
-        x = anchor.x() - fw - margin
+        gap = 8  # large.right ≈ normal.left - gap
+        # Prefer left of the normal preview (over results), never grow the dock.
+        x = anchor.x() - fw - gap
         y = anchor.y()
-        if x < client.left() + margin:
-            x = client.left() + margin
-        if y < client.top() + margin:
-            y = client.top() + margin
-        if x + fw > client.right() - margin:
-            x = max(client.left() + margin, client.right() - margin - fw)
-        if y + fh > client.bottom() - margin:
-            y = max(client.top() + margin, client.bottom() - margin - fh)
+        if x < client.left() + gap:
+            x = client.left() + gap
+        if y < client.top() + gap:
+            y = client.top() + gap
+        if x + fw > client.right() - gap:
+            x = max(client.left() + gap, client.right() - gap - fw)
+        if y + fh > client.bottom() - gap:
+            y = max(client.top() + gap, client.bottom() - gap - fh)
+        # Final clamp: keep entirely inside main window client
+        x = min(max(x, client.left()), max(client.left(), client.right() - fw))
+        y = min(max(y, client.top()), max(client.top(), client.bottom() - fh))
         return QRect(x, y, fw, fh)
 
     def _show_overlay(self) -> None:
+        """Show large overlay only — never mutate normal preview geometry/pixmap."""
         if self._list_hovering:
             return
         pix = self._selection_pix
@@ -395,7 +399,6 @@ class FixedHoverPreviewPanel(QFrame):
         if placed is None:
             return
         _, client = placed
-        # Max box: leave room for the right dock strip (~preview width)
         preview_w = max(self.width(), 1)
         max_w = max(120, client.width() - preview_w - 24)
         max_h = max(120, client.height() - 24)
@@ -431,15 +434,17 @@ class FixedHoverPreviewPanel(QFrame):
             return
         if self._selection_pix is None or self._selection_pix.isNull():
             return
+        # Critical: do NOT call _apply_fit_image / resize normal preview here.
         self._show_overlay()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
-        # Delay: mouse may move onto overlay without closing.
+        # Delay: mouse may move onto large overlay (hover zone).
         self._overlay_hide_timer.start()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # Only refit normal canvas when the dock itself resized — not on overlay show.
         pix = getattr(self, "_source_pix", None)
         if pix is not None and not pix.isNull():
             self._apply_fit_image(pix, smooth=True, fill=_NORMAL_FILL)
