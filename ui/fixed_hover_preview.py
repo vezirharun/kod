@@ -1,29 +1,103 @@
-"""Result Detail üst ana önizleme + hover geçici gösterim."""
+"""Result Detail üst preview + in-app hover overlay (liste üzerine)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
+    QMainWindow,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ui.theme import configure_dock_scroll_area
+from ui.theme import COLOR_BG, COLOR_BORDER, COLOR_SURFACE, configure_dock_scroll_area
 
-# Selection preview: normal is inset; mouse-over fills the canvas (contain-fit).
-_NORMAL_FILL = 0.78
-_MAGNIFY_FILL = 1.0
+# Dock içi normal preview fill (overlay ayrı; dock büyütülmez).
+_NORMAL_FILL = 1.0
+
+
+def _find_main_window(widget: QWidget | None) -> QMainWindow | None:
+    w = widget
+    while w is not None:
+        if isinstance(w, QMainWindow):
+            return w
+        w = w.parentWidget()
+    return None
+
+
+class ResultDetailPreviewOverlay(QFrame):
+    """Ana pencere içinde floating preview — sonuç listesinin üzerinde."""
+
+    def __init__(self, host: "FixedHoverPreviewPanel", parent: QWidget):
+        super().__init__(parent)
+        self._host = host
+        self.setObjectName("ResultDetailPreviewOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMouseTracking(True)
+        self.hide()
+        self.setStyleSheet(
+            f"QFrame#ResultDetailPreviewOverlay {{"
+            f"background:{COLOR_SURFACE};"
+            f"border:1px solid {COLOR_BORDER};"
+            f"border-radius:6px;"
+            f"}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        self.lbl_image = QLabel()
+        self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_image.setMinimumSize(0, 0)
+        self.lbl_image.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
+        self.lbl_image.setStyleSheet(f"background:{COLOR_BG};border-radius:4px;")
+        self.lbl_image.setMouseTracking(True)
+        lay.addWidget(self.lbl_image)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        super().enterEvent(event)
+        self._host._overlay_zone_enter()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        super().leaveEvent(event)
+        self._host._overlay_zone_leave()
+
+    def set_pixmap_contain(self, pix: QPixmap, box: QRect) -> tuple[int, int]:
+        """Contain-fit pix into box; size/position overlay; return display size."""
+        if pix.isNull() or box.width() < 32 or box.height() < 32:
+            self.hide()
+            return (0, 0)
+        pad = 16
+        aw = max(1, box.width() - pad)
+        ah = max(1, box.height() - pad)
+        nw, nh = int(pix.width()), int(pix.height())
+        scale = min(1.0, aw / max(nw, 1), ah / max(nh, 1))
+        tw = max(1, int(nw * scale))
+        th = max(1, int(nh * scale))
+        self.lbl_image.setPixmap(
+            pix.scaled(
+                tw,
+                th,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        # Frame size = image + margins
+        fw = tw + 16
+        fh = th + 16
+        # Prefer left of anchor, clamped inside box
+        self.setFixedSize(fw, fh)
+        return tw, th
 
 
 class FixedHoverPreviewPanel(QFrame):
-    """Sağ dock üstündeki ANA önizleme alanı (seçim + geçici liste hover)."""
+    """Sağ dock üstündeki normal preview; hover → ana pencere overlay."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,10 +108,14 @@ class FixedHoverPreviewPanel(QFrame):
         )
         self.setMouseTracking(True)
         self._source_pix: QPixmap | None = None
-        self._hide_timer = QTimer(self)
-        self._hide_timer.setSingleShot(True)
-        self._hide_timer.setInterval(175)
-        self._hide_timer.timeout.connect(self._restore_selection)
+        self._list_hide_timer = QTimer(self)
+        self._list_hide_timer.setSingleShot(True)
+        self._list_hide_timer.setInterval(175)
+        self._list_hide_timer.timeout.connect(self._restore_selection)
+        self._overlay_hide_timer = QTimer(self)
+        self._overlay_hide_timer.setSingleShot(True)
+        self._overlay_hide_timer.setInterval(120)
+        self._overlay_hide_timer.timeout.connect(self._hide_overlay)
         self.setStyleSheet(
             "QFrame#FixedHoverPreview {"
             "background:#1c2129;border-bottom:1px solid #252b36;"
@@ -71,13 +149,19 @@ class FixedHoverPreviewPanel(QFrame):
         self._selection_token = 0
         self._selection_name = ""
         self._selection_pix: QPixmap | None = None
-        self._list_hovering = False  # results-list card hover (other file)
-        self._canvas_magnified = False  # mouse over this canvas → enlarge selection
+        self._list_hovering = False
+        self._overlay: ResultDetailPreviewOverlay | None = None
+        self._overlay_visible = False
 
         from ui.thumbnail_scheduler import get_thumbnail_scheduler
 
         get_thumbnail_scheduler().thumbnail_ready.connect(self._on_thumb_ready)
         self.setVisible(True)
+
+    # --- Compatibility aliases (older list-hover API) ---
+    @property
+    def _hide_timer(self) -> QTimer:
+        return self._list_hide_timer
 
     def _avail_box(self) -> tuple[int, int]:
         w = max(1, int(self.lbl_image.width() or self.width() or 1) - 4)
@@ -92,11 +176,6 @@ class FixedHoverPreviewPanel(QFrame):
             p = p.parent()
         return w, h
 
-    def _current_fill(self) -> float:
-        if self._list_hovering:
-            return _MAGNIFY_FILL
-        return _MAGNIFY_FILL if self._canvas_magnified else _NORMAL_FILL
-
     def _apply_fit_image(
         self,
         pix: QPixmap,
@@ -104,7 +183,7 @@ class FixedHoverPreviewPanel(QFrame):
         smooth: bool = True,
         fill: float | None = None,
     ) -> tuple[int, int]:
-        """Contain-fit cached pixmap into canvas; never expand the dock / open files."""
+        """Contain-fit into the small dock canvas only (never opens files)."""
         if pix.isNull():
             return (0, 0)
         self._source_pix = QPixmap(pix)
@@ -137,7 +216,6 @@ class FixedHoverPreviewPanel(QFrame):
         tooltip: str = "",
         smooth: bool = True,
     ) -> tuple[int, int]:
-        """Selected result → permanent main preview (cached pixmap only)."""
         self._selection_token = int(file_id or self._selection_token or 0)
         if filename:
             self._selection_name = filename
@@ -148,16 +226,17 @@ class FixedHoverPreviewPanel(QFrame):
             self.lbl_caption.setText(self._selection_name or "Önizleme")
             if tooltip:
                 self.lbl_image.setToolTip(tooltip)
-            return self._apply_fit_image(
-                pix, smooth=smooth, fill=self._current_fill()
-            )
+            result = self._apply_fit_image(pix, smooth=smooth, fill=_NORMAL_FILL)
+            if self._overlay_visible:
+                self._show_overlay()
+            return result
         return (0, 0)
 
     def clear_selection(self) -> None:
         self._selection_token = 0
         self._selection_name = ""
         self._selection_pix = None
-        self._canvas_magnified = False
+        self._hide_overlay(immediate=True)
         if not self._list_hovering:
             self.lbl_image.clear()
             self.lbl_image.setText("Önizleme")
@@ -167,7 +246,7 @@ class FixedHoverPreviewPanel(QFrame):
     def set_selection_pending(self, file_id: int, filename: str) -> None:
         self._selection_token = int(file_id)
         self._selection_name = filename or ""
-        self._canvas_magnified = False
+        self._hide_overlay(immediate=True)
         if not self._list_hovering:
             self.lbl_caption.setText(self._selection_name or "Yükleniyor…")
             self.lbl_image.setText("···")
@@ -175,6 +254,7 @@ class FixedHoverPreviewPanel(QFrame):
     def set_selection_failed(self, file_id: int, filename: str, reason: str) -> None:
         if int(file_id) != int(self._selection_token):
             return
+        self._hide_overlay(immediate=True)
         if not self._list_hovering:
             self.lbl_image.clear()
             self.lbl_image.setText("!")
@@ -196,7 +276,7 @@ class FixedHoverPreviewPanel(QFrame):
             self.lbl_image.clear()
             self.lbl_image.setText("!")
             return
-        self._apply_fit_image(pix, smooth=True, fill=_MAGNIFY_FILL)
+        self._apply_fit_image(pix, smooth=True, fill=_NORMAL_FILL)
         self.lbl_caption.setText(self._hover_name)
 
     def show_thumbnail(
@@ -207,12 +287,12 @@ class FixedHoverPreviewPanel(QFrame):
         *,
         source_path: str = "",
     ) -> None:
-        """Geçici sonuç-listesi hover — seçim önizlemesini bozmadan üstte gösterir."""
-        self._hide_timer.stop()
+        """Geçici sonuç-listesi hover (dock içi); selection overlay kapanır."""
+        self._list_hide_timer.stop()
+        self._hide_overlay(immediate=True)
         if not thumbnail_path and not source_path:
             return
         self._list_hovering = True
-        self._canvas_magnified = False
         self._hover_path = thumbnail_path
         self._hover_name = filename or Path(thumbnail_path or source_path).name
         self._hover_token = int(file_id)
@@ -223,7 +303,7 @@ class FixedHoverPreviewPanel(QFrame):
         if cached is not None and not cached.isNull():
             pix = QPixmap.fromImage(cached)
             if not pix.isNull():
-                self._apply_fit_image(pix, smooth=False, fill=_MAGNIFY_FILL)
+                self._apply_fit_image(pix, smooth=False, fill=_NORMAL_FILL)
                 self.lbl_image.setText("")
             else:
                 self.lbl_image.clear()
@@ -242,58 +322,129 @@ class FixedHoverPreviewPanel(QFrame):
         )
 
     def schedule_hide(self) -> None:
-        self._hide_timer.start()
+        self._list_hide_timer.start()
 
     def cancel_hide(self) -> None:
-        self._hide_timer.stop()
+        self._list_hide_timer.stop()
 
     def _restore_selection(self) -> None:
         self._list_hovering = False
         self._hover_token = 0
         if self._selection_pix is not None and not self._selection_pix.isNull():
             self.lbl_caption.setText(self._selection_name or "Önizleme")
-            self._apply_fit_image(
-                self._selection_pix,
-                smooth=True,
-                fill=self._current_fill(),
-            )
+            self._apply_fit_image(self._selection_pix, smooth=True, fill=_NORMAL_FILL)
         elif self._selection_token:
             self.lbl_caption.setText(self._selection_name or "Yükleniyor…")
             self.lbl_image.setText("···")
         else:
             self.clear_selection()
 
+    def _ensure_overlay(self) -> ResultDetailPreviewOverlay | None:
+        if self._overlay is not None:
+            return self._overlay
+        mw = _find_main_window(self)
+        if mw is None:
+            return None
+        self._overlay = ResultDetailPreviewOverlay(self, mw)
+        return self._overlay
+
+    def _overlay_anchor_and_box(self) -> tuple[QPoint, QRect] | None:
+        mw = _find_main_window(self)
+        if mw is None:
+            return None
+        # Main window client rect in main-window coords
+        client = mw.rect()
+        # Prefer central widget area if present
+        central = mw.centralWidget()
+        if central is not None:
+            top_left = central.mapTo(mw, QPoint(0, 0))
+            client = QRect(top_left, central.size())
+        # Anchor = this preview's top-left in main-window coords
+        anchor = self.mapTo(mw, QPoint(0, 0))
+        return anchor, client
+
+    def _compute_overlay_geometry(self, fw: int, fh: int) -> QRect | None:
+        placed = self._overlay_anchor_and_box()
+        if placed is None:
+            return None
+        anchor, client = placed
+        margin = 8
+        # Place to the LEFT of the preview panel (over results list).
+        x = anchor.x() - fw - margin
+        y = anchor.y()
+        if x < client.left() + margin:
+            x = client.left() + margin
+        if y < client.top() + margin:
+            y = client.top() + margin
+        if x + fw > client.right() - margin:
+            x = max(client.left() + margin, client.right() - margin - fw)
+        if y + fh > client.bottom() - margin:
+            y = max(client.top() + margin, client.bottom() - margin - fh)
+        return QRect(x, y, fw, fh)
+
+    def _show_overlay(self) -> None:
+        if self._list_hovering:
+            return
+        pix = self._selection_pix
+        if pix is None or pix.isNull():
+            return
+        overlay = self._ensure_overlay()
+        if overlay is None:
+            return
+        placed = self._overlay_anchor_and_box()
+        if placed is None:
+            return
+        _, client = placed
+        # Max box: leave room for the right dock strip (~preview width)
+        preview_w = max(self.width(), 1)
+        max_w = max(120, client.width() - preview_w - 24)
+        max_h = max(120, client.height() - 24)
+        box = QRect(0, 0, max_w, max_h)
+        tw, th = overlay.set_pixmap_contain(pix, box)
+        if tw <= 0:
+            return
+        fw, fh = overlay.width(), overlay.height()
+        geo = self._compute_overlay_geometry(fw, fh)
+        if geo is None:
+            return
+        overlay.setGeometry(geo)
+        overlay.raise_()
+        overlay.show()
+        self._overlay_visible = True
+
+    def _hide_overlay(self, *, immediate: bool = False) -> None:
+        self._overlay_hide_timer.stop()
+        if self._overlay is not None:
+            self._overlay.hide()
+        self._overlay_visible = False
+
+    def _overlay_zone_enter(self) -> None:
+        self._overlay_hide_timer.stop()
+
+    def _overlay_zone_leave(self) -> None:
+        self._overlay_hide_timer.start()
+
     def enterEvent(self, event) -> None:  # noqa: N802
         super().enterEvent(event)
-        # Canvas magnify: selection pixmap only — never open files / external apps.
+        self._overlay_hide_timer.stop()
         if self._list_hovering:
             return
         if self._selection_pix is None or self._selection_pix.isNull():
             return
-        if self._canvas_magnified:
-            return
-        self._canvas_magnified = True
-        self._apply_fit_image(
-            self._selection_pix, smooth=True, fill=_MAGNIFY_FILL
-        )
+        self._show_overlay()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
-        if not self._canvas_magnified:
-            return
-        self._canvas_magnified = False
-        if self._list_hovering:
-            return
-        if self._selection_pix is not None and not self._selection_pix.isNull():
-            self._apply_fit_image(
-                self._selection_pix, smooth=True, fill=_NORMAL_FILL
-            )
+        # Delay: mouse may move onto overlay without closing.
+        self._overlay_hide_timer.start()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         pix = getattr(self, "_source_pix", None)
         if pix is not None and not pix.isNull():
-            self._apply_fit_image(pix, smooth=True, fill=self._current_fill())
+            self._apply_fit_image(pix, smooth=True, fill=_NORMAL_FILL)
+        if self._overlay_visible:
+            self._show_overlay()
 
 
 class InspectorDockContent(QWidget):
