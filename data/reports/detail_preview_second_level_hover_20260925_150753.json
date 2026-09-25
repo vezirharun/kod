@@ -1,0 +1,33 @@
+{
+  "report_id": "detail_preview_second_level_hover_20260925_150753",
+  "timestamp": "20260925_150753",
+  "commit_message": "fix: add detail preview hover magnify",
+  "states": {
+    "1_normal": "selection in FixedHoverPreviewPanel canvas",
+    "2_list_hover": "hovered result in same canvas (preserved)",
+    "3_detail_hover": "DetailPreviewHoverOverlay magnify left of canvas"
+  },
+  "widgets": {
+    "canvas": "FixedHoverPreviewPanel",
+    "overlay": "DetailPreviewHoverOverlay"
+  },
+  "overlay_geometry": {
+    "anchor": "left of normal preview, gap=8",
+    "max_box": "max(space_left, 0.55*client_w, 240) x 0.70*client_h",
+    "fit": "contain-fit from _source_pix"
+  },
+  "files_changed": [
+    "ui/fixed_hover_preview.py",
+    "tests/test_detail_preview_second_level_hover.py",
+    "tests/test_result_hover_full_detail_preview.py",
+    "tests/test_result_detail_hover_magnify.py",
+    "tests/test_result_detail_dual_preview.py"
+  ],
+  "tests": {"passed": 20, "failed": 0},
+  "real_ui": {
+    "overlay_opens": true,
+    "normal_geometry_frozen": true,
+    "list_hover_preserved": true,
+    "no_external_file": true
+  }
+}

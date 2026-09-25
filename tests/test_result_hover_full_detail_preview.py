@@ -78,21 +78,16 @@ class TestResultHoverFullDetailPreview(unittest.TestCase):
         self.assertEqual(p._selection_token, 1)  # selection unchanged
 
     def test_result_hover_uses_full_detail_preview_canvas(self):
-        import ui.fixed_hover_preview as mod
-
-        self.assertFalse(hasattr(mod, "ResultDetailPreviewOverlay"))
-        src = inspect.getsource(mod.FixedHoverPreviewPanel)
-        self.assertNotIn("ResultDetailPreviewOverlay", src)
-        self.assertNotIn("_show_overlay", src)
         win, dock, content = self._docked()
         p = content.hover_preview
         geo_panel = p.geometry()
         p.show_thumbnail(3, "/t/c.jpg", "c.jpg")
         p._apply_fit_image(_pix(1200, 600), smooth=False)
         self._app.processEvents()
-        # Image lives in lbl_image (full canvas), not a separate overlay widget
+        # List hover paints into dock canvas; overlay stays closed.
         self.assertEqual(p.geometry(), geo_panel)
         self.assertIs(p.lbl_image.parentWidget(), p)
+        self.assertFalse(p._overlay_visible)
 
     def test_result_hover_preview_maximize_contain_fit(self):
         win, dock, content = self._docked()
@@ -181,8 +176,11 @@ class TestResultHoverFullDetailPreview(unittest.TestCase):
         self.assertFalse(p._list_hovering)
         self.assertEqual(p.lbl_caption.text(), "sel.jpg")
 
-    def test_no_floating_overlay_class(self):
-        import ui.fixed_hover_preview as mod
-
-        self.assertFalse(hasattr(mod, "ResultDetailPreviewOverlay"))
-        self.assertFalse(hasattr(mod.FixedHoverPreviewPanel, "_show_overlay"))
+    def test_list_hover_does_not_open_magnify_overlay(self):
+        """STATE 2 paints canvas only; magnify overlay is STATE 3 (detail hover)."""
+        win, dock, content = self._docked()
+        p = content.hover_preview
+        p.set_selection_pixmap(_pix(100, 100), file_id=1, filename="sel.jpg")
+        p.show_thumbnail(9, "/t/z.jpg", "z.jpg")
+        self.assertTrue(p._list_hovering)
+        self.assertFalse(p._overlay_visible)

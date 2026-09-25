@@ -1,14 +1,12 @@
-"""Legacy overlay suite retired — list hover uses full detail canvas.
-
-See tests/test_result_hover_full_detail_preview.py.
-"""
+"""Legacy overlay naming retired — see test_detail_preview_second_level_hover.py."""
 from __future__ import annotations
 
 import unittest
 
 
 class TestResultDetailHoverOverlayRetired(unittest.TestCase):
-    def test_floating_overlay_removed(self):
+    def test_detail_magnify_overlay_exists(self):
         import ui.fixed_hover_preview as mod
 
-        self.assertFalse(hasattr(mod, "ResultDetailPreviewOverlay"))
+        self.assertTrue(hasattr(mod, "DetailPreviewHoverOverlay"))
+        self.assertTrue(hasattr(mod.FixedHoverPreviewPanel, "_show_overlay"))
