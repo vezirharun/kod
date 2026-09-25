@@ -46,12 +46,28 @@ class TestKeyboardPreviewSyncFinal(unittest.TestCase):
 
     def _chain(self, n=5):
         """ResultsPanel + FixedHoverPreviewPanel wired like main window."""
-        from ui.fixed_hover_preview import FixedHoverPreviewPanel
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
+
+        from ui.fixed_hover_preview import FixedHoverPreviewPanel, InspectorDockContent
         from ui.results_panel import ResultsPanel
 
+        win = QMainWindow()
+        win.resize(1280, 800)
         panel = ResultsPanel()
-        preview = FixedHoverPreviewPanel()
-        preview.resize(360, 280)
+        win.setCentralWidget(panel)
+        content = InspectorDockContent()
+        preview = content.hover_preview
+        dock = QDockWidget("Sonuc Detay", win)
+        dock.setWidget(content)
+        win.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        win.show()
+        dock.show()
+        self._app.processEvents()
+        win.resizeDocks([dock], [360], Qt.Orientation.Horizontal)
+        self._app.processEvents()
+        # keep refs so GC does not kill the window mid-test
+        self._chain_win = win
         seq = []
 
         def on_sel(r):
@@ -153,7 +169,7 @@ class TestKeyboardPreviewSyncFinal(unittest.TestCase):
         self._app.processEvents()
         preview.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        self.assertTrue(preview._overlay_visible)
+        self.assertTrue(preview._canvas_hovering)
         self.assertEqual(preview._selection_token, 2)
 
     def test_canvas_hover_uses_high_resolution_preview(self):
@@ -166,48 +182,71 @@ class TestKeyboardPreviewSyncFinal(unittest.TestCase):
         self.assertGreaterEqual(best.width(), 1024)
 
     def test_canvas_hover_stays_inside_detail_canvas(self):
-        from PySide6.QtCore import QPointF
+        """Normal preview box unchanged; zoom overlay may spill left (right-anchored)."""
+        from PySide6.QtCore import QPoint, QPointF
         from PySide6.QtGui import QEnterEvent
 
         panel, preview, seq = self._chain(2)
         panel._select_result(_result(1))
-        preview.resize(360, 280)
         self._app.processEvents()
+        win = preview.window()
+        before = preview.lbl_image.geometry()
+        normal_right = preview.lbl_image.mapTo(win, QPoint(preview.lbl_image.width(), 0)).x()
         preview.enterEvent(QEnterEvent(QPointF(4, 4), QPointF(4, 4), QPointF(4, 4)))
         self._app.processEvents()
-        self.assertEqual(preview._overlay.geometry(), preview._canvas_rect())
-        self.assertIs(preview._overlay.parentWidget(), preview)
+        self.assertTrue(preview._canvas_hovering)
+        self.assertEqual(preview.lbl_image.geometry(), before)
+        self.assertTrue(preview._overlay.isVisible())
+        self.assertAlmostEqual(
+            preview._overlay.x() + preview._overlay.width(), normal_right, delta=3
+        )
+        self.assertLess(preview._overlay.x(), preview.lbl_image.mapTo(win, QPoint(0, 0)).x())
 
     def test_canvas_hover_does_not_open_popup(self):
-        from PySide6.QtCore import QPointF
+        """Overlay is allowed but must be right-anchored, not a centered popup."""
+        from PySide6.QtCore import QPoint, QPointF, Qt
         from PySide6.QtGui import QEnterEvent
-        from PySide6.QtWidgets import QMainWindow
+        from PySide6.QtWidgets import QDockWidget, QMainWindow, QWidget
+
+        from ui.fixed_hover_preview import InspectorDockContent
 
         win = QMainWindow()
-        from ui.fixed_hover_preview import FixedHoverPreviewPanel
-
-        p = FixedHoverPreviewPanel(win)
-        win.setCentralWidget(p)
-        win.resize(1000, 700)
+        win.resize(1280, 800)
+        win.setCentralWidget(QWidget())
+        content = InspectorDockContent()
+        p = content.hover_preview
+        dock = QDockWidget("Sonuc Detay", win)
+        dock.setWidget(content)
+        win.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         win.show()
+        dock.show()
+        self._app.processEvents()
+        win.resizeDocks([dock], [360], Qt.Orientation.Horizontal)
+        self._app.processEvents()
         p.set_selection_pixmap(_pix(800, 400), file_id=1, filename="a.jpg")
         self._app.processEvents()
+        normal_right = p.lbl_image.mapTo(win, QPoint(p.lbl_image.width(), 0)).x()
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        self.assertIs(p._overlay.parentWidget(), p)
-        self.assertNotIsInstance(p._overlay.parentWidget(), QMainWindow)
+        self.assertTrue(p._canvas_hovering)
+        self.assertTrue(p._overlay.isVisible())
+        self.assertAlmostEqual(p._overlay.x() + p._overlay.width(), normal_right, delta=3)
+        central = win.centralWidget()
+        ccenter = central.mapTo(win, central.rect().center())
+        ocenter = p._overlay.mapTo(win, p._overlay.rect().center())
+        self.assertNotEqual(ocenter.x(), ccenter.x())
 
     def test_canvas_leave_restores_active_result_preview(self):
         from PySide6.QtCore import QEvent, QPointF
         from PySide6.QtGui import QEnterEvent
 
         panel, preview, seq = self._chain(2)
-        panel._select_result(_result(5) if False else _result(2))
+        panel._select_result(_result(2))
         preview.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
         preview.leaveEvent(QEvent(QEvent.Type.Leave))
-        preview._hide_overlay(immediate=True)
-        self.assertFalse(preview._overlay_visible)
+        preview._end_canvas_hover(immediate=True)
+        self.assertFalse(preview._canvas_hovering)
         self.assertEqual(preview._selection_token, 2)
         self.assertEqual(preview.lbl_caption.text(), "02.jpg")
 

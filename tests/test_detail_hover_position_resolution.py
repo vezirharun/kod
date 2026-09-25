@@ -1,4 +1,4 @@
-"""Detail hover preview: in-canvas geometry + high-resolution source."""
+"""Detail hover: right-anchored overlay expanding left (dock width unchanged)."""
 from __future__ import annotations
 
 import os
@@ -61,7 +61,12 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
         self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        self.assertIs(p._overlay.parentWidget(), p)
+        self.assertTrue(p._canvas_hovering)
+        self.assertIsNotNone(p._overlay)
+        self.assertTrue(p._overlay.isVisible())
+        from PySide6.QtCore import QPoint
+        normal_right = p.lbl_image.mapTo(win, QPoint(p.lbl_image.width(), 0)).x()
+        self.assertAlmostEqual(p._overlay.x() + p._overlay.width(), normal_right, delta=3)
 
     def test_detail_hover_preview_geometry_matches_canvas(self):
         from PySide6.QtCore import QPointF
@@ -71,9 +76,15 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
         p = content.hover_preview
         p.set_selection_pixmap(_pix(800, 400), file_id=2, filename="b.jpg")
         self._app.processEvents()
+        before = p.geometry()
+        before_img = p.lbl_image.geometry()
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        self.assertEqual(p._overlay.geometry(), p._canvas_rect())
+        self.assertEqual(p.geometry(), before)
+        self.assertEqual(p.lbl_image.geometry(), before_img)
+        pm = p.lbl_image.pixmap()
+        self.assertLessEqual(pm.width(), before_img.width() + 2)
+        self.assertLessEqual(pm.height(), before_img.height() + 2)
 
     def test_detail_hover_preview_not_centered_in_main_window(self):
         from PySide6.QtCore import QPointF
@@ -85,17 +96,15 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
         self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        ov = p._overlay
-        # Overlay top-left in window coords = panel contents (red zone).
-        canvas_tl = p.mapTo(win, p._canvas_rect().topLeft())
-        ov_tl = ov.mapTo(win, ov.rect().topLeft())
-        self.assertEqual(ov_tl, canvas_tl)
-        # Not floating over central widget center.
+        self.assertTrue(p._canvas_hovering)
+        self.assertTrue(p._overlay.isVisible())
+        from PySide6.QtCore import QPoint
+        normal_right = p.lbl_image.mapTo(win, QPoint(p.lbl_image.width(), 0)).x()
+        self.assertAlmostEqual(p._overlay.x() + p._overlay.width(), normal_right, delta=3)
         central = win.centralWidget()
-        if central is not None:
-            ccenter = central.mapTo(win, central.rect().center())
-            ocenter = ov.mapTo(win, ov.rect().center())
-            self.assertNotEqual(ocenter, ccenter)
+        ccenter = central.mapTo(win, central.rect().center())
+        ocenter = p._overlay.mapTo(win, p._overlay.rect().center())
+        self.assertNotEqual(ocenter.x(), ccenter.x())
 
     def test_detail_hover_preview_uses_high_resolution_source(self):
         from PySide6.QtCore import QPointF
@@ -103,16 +112,11 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
 
         win, dock, content = self._docked()
         p = content.hover_preview
-        hi = _pix(1024, 512, "#00aa00")
-        p.set_selection_pixmap(hi, file_id=4, filename="hi.jpg")
-        # Simulate list-hover low-res overwrite of display source only.
+        p.set_selection_pixmap(_pix(1024, 512, "#00aa00"), file_id=4, filename="hi.jpg")
         p._source_pix = _pix(256, 128, "#ff0000")
-        p._list_hovering = False
-        self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
         used = p._overlay_source_pix()
-        self.assertIsNotNone(used)
         self.assertGreaterEqual(used.width(), 1024)
 
     def test_detail_hover_preview_does_not_use_low_res_thumbnail_when_better_source_exists(
@@ -134,10 +138,12 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
         p = content.hover_preview
         p.set_selection_pixmap(_pix(1600, 400), file_id=8, filename="wide.jpg")
         self._app.processEvents()
+        # Normal contain preserves ratio; hover expand fills box (may crop edges).
+        pm0 = p.lbl_image.pixmap()
+        self.assertAlmostEqual(pm0.width() / max(pm0.height(), 1), 4.0, delta=0.15)
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        pm = p._overlay.lbl_image.pixmap()
-        self.assertAlmostEqual(pm.width() / max(pm.height(), 1), 4.0, delta=0.1)
+        self.assertTrue(p._canvas_hovering)
 
     def test_detail_hover_preview_does_not_resize_dock(self):
         from PySide6.QtCore import QPointF

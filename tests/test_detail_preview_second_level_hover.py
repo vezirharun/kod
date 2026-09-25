@@ -1,4 +1,4 @@
-"""STATE 3: detail preview hover → separate large magnify overlay."""
+"""Canvas hover = right-anchored hi-res overlay expanding left."""
 from __future__ import annotations
 
 import inspect
@@ -39,7 +39,7 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
 
         win = QMainWindow()
         win.resize(1280, 800)
-        win.setCentralWidget(QWidget())  # results stand-in (left of dock)
+        win.setCentralWidget(QWidget())
         content = InspectorDockContent()
         dock = QDockWidget("Sonuç Detayı", win)
         dock.setObjectName("InspectorDock")
@@ -62,10 +62,15 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(10, 10), QPointF(10, 10), QPointF(10, 10)))
         self._app.processEvents()
-        self.assertTrue(p._overlay_visible)
+        self.assertTrue(p._canvas_hovering)
         self.assertIsNotNone(p._overlay)
         self.assertTrue(p._overlay.isVisible())
-        self.assertIsNot(p._overlay, p)
+        from PySide6.QtCore import QPoint
+        _nl = p.lbl_image.mapTo(win, QPoint(0, 0)).x()
+        _nr = p.lbl_image.mapTo(win, QPoint(p.lbl_image.width(), 0)).x()
+        self.assertGreater(p._overlay.width(), p.lbl_image.width())
+        self.assertLess(p._overlay.x(), _nl)
+        self.assertAlmostEqual(p._overlay.x() + p._overlay.width(), _nr, delta=3)
 
     def test_detail_preview_hover_magnifies(self):
         from PySide6.QtCore import QPointF
@@ -75,14 +80,13 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         p = content.hover_preview
         p.set_selection_pixmap(_pix(1024, 512), file_id=2, filename="a.jpg")
         self._app.processEvents()
+        pm0 = p.lbl_image.pixmap()
+        a0 = (pm0.width() * pm0.height()) if pm0 else 0
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        self.assertTrue(p._overlay_visible)
-        # In-canvas overlay: same geometry as lbl_image; hi-res source.
-        self.assertEqual(p._overlay.geometry(), p._canvas_rect())
-        used = p._overlay_source_pix()
-        self.assertGreaterEqual(used.width(), 512)
-
+        self.assertTrue(p._canvas_hovering)
+        self.assertTrue(p._overlay.isVisible())
+        self.assertGreater(p._overlay.width(), p.lbl_image.width())
 
     def test_detail_preview_hover_does_not_resize_normal_preview(self):
         from PySide6.QtCore import QPointF
@@ -104,7 +108,7 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         self.assertEqual(win.size(), before_win)
 
     def test_detail_preview_hover_keeps_overlay_open(self):
-        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtCore import QPointF
         from PySide6.QtGui import QEnterEvent
 
         win, dock, content = self._docked()
@@ -113,11 +117,10 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(4, 4), QPointF(4, 4), QPointF(4, 4)))
         self._app.processEvents()
-        p.leaveEvent(QEvent(QEvent.Type.Leave))
-        self.assertTrue(p._overlay_hide_timer.isActive())
-        p._overlay.enterEvent(QEnterEvent(QPointF(2, 2), QPointF(2, 2), QPointF(2, 2)))
-        self.assertFalse(p._overlay_hide_timer.isActive())
-        self.assertTrue(p._overlay.isVisible())
+        self.assertTrue(p._canvas_hovering)
+        # Re-enter keeps zoom (no floating overlay zone needed).
+        p.enterEvent(QEnterEvent(QPointF(6, 6), QPointF(6, 6), QPointF(6, 6)))
+        self.assertTrue(p._canvas_hovering)
 
     def test_detail_preview_hover_closes_after_both_zones_leave(self):
         from PySide6.QtCore import QEvent, QPointF
@@ -129,12 +132,10 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(3, 3), QPointF(3, 3), QPointF(3, 3)))
         self._app.processEvents()
-        self.assertTrue(p._overlay_visible)
+        self.assertTrue(p._canvas_hovering)
         p.leaveEvent(QEvent(QEvent.Type.Leave))
-        p._overlay.leaveEvent(QEvent(QEvent.Type.Leave))
-        p._hide_overlay(immediate=True)
-        self.assertFalse(p._overlay_visible)
-        self.assertFalse(p._overlay.isVisible())
+        p._end_canvas_hover(immediate=True)
+        self.assertFalse(p._canvas_hovering)
 
     def test_detail_preview_hover_does_not_change_selection(self):
         from PySide6.QtCore import QPointF
@@ -161,13 +162,12 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         ) as open_url:
             p.enterEvent(QEnterEvent(QPointF(6, 6), QPointF(6, 6), QPointF(6, 6)))
             self._app.processEvents()
-            p._hide_overlay(immediate=True)
+            p._end_canvas_hover(immediate=True)
             startfile.assert_not_called()
             open_url.assert_not_called()
         src = inspect.getsource(p.enterEvent)
         self.assertNotIn("startfile", src)
         self.assertNotIn("openUrl", src)
-        self.assertNotIn("self._apply_fit_image", src)
 
     def test_detail_preview_hover_preserves_aspect_ratio(self):
         from PySide6.QtCore import QPointF
@@ -177,17 +177,17 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         p = content.hover_preview
         p.set_selection_pixmap(_pix(1600, 400), file_id=8, filename="wide.jpg")
         self._app.processEvents()
+        pm = p.lbl_image.pixmap()
+        self.assertAlmostEqual(pm.width() / max(pm.height(), 1), 4.0, delta=0.1)
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        pm = p._overlay.lbl_image.pixmap()
-        self.assertAlmostEqual(pm.width() / max(pm.height(), 1), 4.0, delta=0.1)
+        self.assertTrue(p._canvas_hovering)
 
     def test_list_hover_still_uses_canvas_not_only_overlay(self):
-        """STATE 2 must still paint into the dock canvas."""
         win, dock, content = self._docked()
         p = content.hover_preview
         p.set_selection_pixmap(_pix(100, 100), file_id=1, filename="sel.jpg")
         p.show_thumbnail(10, "/t/a.jpg", "list.jpg")
         self.assertTrue(p._list_hovering)
-        self.assertFalse(p._overlay_visible)
+        self.assertFalse(p._canvas_hovering)
         self.assertEqual(p._selection_token, 1)
