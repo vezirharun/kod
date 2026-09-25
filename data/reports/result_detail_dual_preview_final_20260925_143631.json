@@ -1,0 +1,80 @@
+{
+  "report_id": "result_detail_dual_preview_final_20260925_143631",
+  "timestamp": "20260925_143631",
+  "commit_message": "fix: finalize dual normal and hover preview",
+  "root_cause": "Hover must not mutate docked normal preview geometry; large preview must be a separate main-window overlay with hover-zone (normal OR large).",
+  "widgets": {
+    "normal_preview": "FixedHoverPreviewPanel",
+    "large_overlay": "ResultDetailPreviewOverlay"
+  },
+  "hover_event_chain": [
+    "normal_enter -> stop hide timer -> _show_overlay (no _apply_fit_image)",
+    "normal_leave -> start delayed hide timer",
+    "overlay_enter -> stop hide timer (stay open)",
+    "overlay_leave -> start hide timer",
+    "leave both -> hide overlay"
+  ],
+  "overlay_geometry": {
+    "anchor": "large.right = normal.left - gap",
+    "gap_px": 8,
+    "placement": "left of normal over results list",
+    "fit": "contain-fit from _selection_pix",
+    "clamp": "main window client rect"
+  },
+  "geometry_assertion": {
+    "rule": "normal_rect_before == normal_rect_after",
+    "test": "test_normal_preview_geometry_unchanged_on_hover",
+    "result": "PASS"
+  },
+  "files_changed": [
+    "ui/fixed_hover_preview.py",
+    "tests/test_result_detail_dual_preview.py"
+  ],
+  "files_not_touched": [
+    "Search",
+    "Ranking",
+    "DINO",
+    "CLIP",
+    "FAISS",
+    "Indexing",
+    "Learning",
+    "Pattern DNA",
+    "Thumbnail pipeline",
+    "JobStore",
+    "Customer Memory",
+    "Category Filter",
+    "Görseli Aç",
+    "Klasörde Aç"
+  ],
+  "tests": {
+    "command": "pytest tests/test_result_detail_dual_preview.py tests/test_result_detail_hover_magnify.py -q",
+    "passed": 28,
+    "failed": 0,
+    "duration_s": 118.14,
+    "named": {
+      "test_normal_preview_geometry_unchanged_on_hover": "PASS",
+      "test_large_preview_overlay_opens_on_hover": "PASS",
+      "test_large_preview_overlay_closes_after_hover_zone_leave": "PASS",
+      "test_large_preview_stays_open_between_normal_and_overlay": "PASS",
+      "test_large_preview_does_not_resize_result_detail": "PASS",
+      "test_large_preview_does_not_resize_main_window": "PASS",
+      "test_large_preview_does_not_open_external_file": "PASS",
+      "test_large_preview_contain_fit": "PASS",
+      "test_large_preview_inside_main_window": "PASS"
+    }
+  },
+  "real_ui": {
+    "method": "Qt QMainWindow + right InspectorDock + QEnterEvent/leave hover zone",
+    "normal_geometry_frozen": true,
+    "overlay_opens_left": true,
+    "overlay_inside_main_window": true,
+    "no_external_file_open": true,
+    "interactive_leopard_smoke": "covered by automated docked dual-preview suite; manual visual parity to reference screenshots expected"
+  },
+  "acceptance": {
+    "normal_state": "right panel normal preview unchanged",
+    "hover_state": "same normal preview + separate large overlay to left",
+    "normal_never_grows": true,
+    "leave_both_hides_overlay": true
+  }
+}
