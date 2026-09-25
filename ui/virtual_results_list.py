@@ -69,6 +69,8 @@ class VirtualResultsList(QScrollArea):
 
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self._build_pool()
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
 
     def _build_pool(self) -> None:
         for _ in range(VISIBLE_POOL_SIZE):
@@ -191,6 +193,93 @@ class VirtualResultsList(QScrollArea):
 
     def card_count(self) -> int:
         return sum(1 for e in self._entries if e[0] == "card")
+
+    def _card_positions(self) -> list[int]:
+        """Entry indices that are result cards (skip headers)."""
+        return [i for i, e in enumerate(self._entries) if e[0] == "card"]
+
+    def _selected_card_pos(self) -> int:
+        """Index into _card_positions() for current selection, or -1."""
+        positions = self._card_positions()
+        if not positions:
+            return -1
+        fid = int(self._selected_file_id or 0)
+        for pos, entry_i in enumerate(positions):
+            result = self._entries[entry_i][1]
+            if int(getattr(result, "file_id", 0) or 0) == fid:
+                return pos
+        return -1
+
+    def result_at_card_pos(self, pos: int):
+        positions = self._card_positions()
+        if pos < 0 or pos >= len(positions):
+            return None
+        return self._entries[positions[pos]][1]
+
+    def ensure_card_pos_visible(self, pos: int) -> None:
+        positions = self._card_positions()
+        if pos < 0 or pos >= len(positions):
+            return
+        entry_i = positions[pos]
+        if entry_i >= len(self._row_offsets):
+            return
+        y = int(self._row_offsets[entry_i])
+        h = int(self._row_heights[entry_i] if entry_i < len(self._row_heights) else 80)
+        bar = self.verticalScrollBar()
+        view_h = max(1, int(self.viewport().height() or self.height() or 1))
+        top = int(bar.value())
+        bottom = top + view_h
+        target = top
+        if y < top:
+            target = max(0, y - 8)
+        elif y + h > bottom:
+            target = max(0, y + h - view_h + 8)
+        else:
+            return
+        bar.setValue(min(target, bar.maximum()))
+        self._layout_visible()
+
+    def navigate_by(self, delta: int) -> bool:
+        """Move active/selected card by delta. Returns True if selection changed."""
+        if delta == 0:
+            return False
+        positions = self._card_positions()
+        if not positions:
+            return False
+        cur = self._selected_card_pos()
+        if cur < 0:
+            # No selection yet — Down selects first, Up selects last.
+            new_pos = 0 if delta > 0 else len(positions) - 1
+        else:
+            new_pos = cur + int(delta)
+            if new_pos < 0 or new_pos >= len(positions):
+                return False  # clamp at ends — no change
+        result = self.result_at_card_pos(new_pos)
+        if result is None:
+            return False
+        new_fid = int(getattr(result, "file_id", 0) or 0)
+        if new_fid == int(self._selected_file_id or 0) and cur == new_pos:
+            return False
+        self.set_selected_file_id(new_fid)
+        self.ensure_card_pos_visible(new_pos)
+        self.card_selected.emit(result)
+        return True
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        key = event.key()
+        if key == Qt.Key.Key_Down:
+            if self.navigate_by(1):
+                event.accept()
+                return
+            event.accept()
+            return
+        if key == Qt.Key.Key_Up:
+            if self.navigate_by(-1):
+                event.accept()
+                return
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _rebuild_geometry(self) -> None:
         heights: list[int] = []

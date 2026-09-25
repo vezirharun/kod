@@ -1,0 +1,22 @@
+{
+  "report_id": "result_keyboard_navigation_20260925_154759",
+  "timestamp": "20260925_154759",
+  "commit_message": "feat: add keyboard navigation for result list",
+  "list_structure": "VirtualResultsList + ResultCard pool",
+  "active_selection": "_selected_file_id via card_selected -> ResultsPanel._select_result -> result_selected",
+  "keyboard": {
+    "down": "navigate_by(+1)",
+    "up": "navigate_by(-1)",
+    "ends": "no-op",
+    "ignored_in": ["QLineEdit", "QTextEdit", "QPlainTextEdit", "QAbstractSpinBox", "editable QComboBox"]
+  },
+  "preview_sync": "existing _show_result_detail / set_selection_pixmap",
+  "auto_scroll": "ensure_card_pos_visible",
+  "checkbox_untouched": true,
+  "files_changed": [
+    "ui/virtual_results_list.py",
+    "ui/results_panel.py",
+    "tests/test_result_keyboard_navigation.py"
+  ],
+  "tests": {"passed": 12, "failed": 0}
+}

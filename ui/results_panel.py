@@ -930,7 +930,41 @@ class ResultsPanel(QWidget):
     def _select_result(self, result: SearchResult) -> None:
         self._selected_file_id = int(result.file_id)
         self.scroll.set_selected_file_id(self._selected_file_id)
+        self.scroll.setFocus(Qt.FocusReason.OtherFocusReason)
         self.result_selected.emit(result)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Forward ↑/↓ to virtual list when focus is not in a text field."""
+        from PySide6.QtWidgets import (
+            QAbstractSpinBox,
+            QComboBox,
+            QLineEdit,
+            QPlainTextEdit,
+            QTextEdit,
+        )
+
+        key = event.key()
+        if key not in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            super().keyPressEvent(event)
+            return
+        fw = self.window().focusWidget() if self.window() else None
+        if fw is not None:
+            if isinstance(
+                fw, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
+            ):
+                super().keyPressEvent(event)
+                return
+            if isinstance(fw, QComboBox) and fw.isEditable():
+                super().keyPressEvent(event)
+                return
+        # Only navigate when focus is within this results panel / list.
+        if fw is not None and fw is not self and not self.isAncestorOf(fw):
+            super().keyPressEvent(event)
+            return
+        if self.scroll.navigate_by(1 if key == Qt.Key.Key_Down else -1):
+            event.accept()
+            return
+        event.accept()
 
     def set_search_activity(
         self,
