@@ -497,11 +497,11 @@ class MainWindow(QMainWindow):
         self._inspector_dock = QDockWidget("Sonuç Detayı", self)
 
         self._inspector_dock.setObjectName("InspectorDock")
-
-        self._inspector_dock.setWidget(self._scrollable_panel(self._inspector_content))
-
-        self._configure_dock(self._inspector_dock, minimum_width=360)
-        self._inspector_dock.setMaximumWidth(540)
+        # No horizontal scrollbar — detail content wraps/fits; vertical scroll only.
+        self._inspector_dock.setWidget(
+            self._scrollable_panel(self._inspector_content, horizontal=False)
+        )
+        self._configure_dock(self._inspector_dock, minimum_width=280)
         self._inspector_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._inspector_dock)
@@ -579,12 +579,18 @@ class MainWindow(QMainWindow):
             dock.topLevelChanged.connect(lambda _floating: self._save_ui_state())
 
     @staticmethod
-    def _scrollable_panel(widget: QWidget) -> QScrollArea:
+    def _scrollable_panel(
+        widget: QWidget, *, horizontal: bool = True
+    ) -> QScrollArea:
         from ui.theme import configure_dock_scroll_area
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if horizontal
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(widget)
         configure_dock_scroll_area(scroll)
@@ -614,7 +620,8 @@ class MainWindow(QMainWindow):
         if needs_move:
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, inspector)
         if force_resize or needs_move:
-            target_width = min(500, max(380, self.width() // 3))
+            # Stay inside main window; do not force a wide native-image width.
+            target_width = min(max(280, self.width() // 3), max(280, self.width() - 200))
             self.resizeDocks(
                 [inspector], [target_width], Qt.Orientation.Horizontal
             )

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 
 class FixedHoverPreviewPanel(QFrame):
@@ -34,10 +34,15 @@ class FixedHoverPreviewPanel(QFrame):
         self.lbl_caption = QLabel("")
         self.lbl_caption.setStyleSheet("color:#94a3b8;font-size:11px;")
         self.lbl_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_caption.setWordWrap(True)
+        self.lbl_caption.setMinimumWidth(0)
         self.lbl_image = QLabel()
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_image.setMinimumHeight(380)
+        self.lbl_image.setMinimumSize(0, 160)
         self.lbl_image.setMaximumHeight(480)
+        self.lbl_image.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.lbl_image.setStyleSheet(
             "background:#232a35;border:1px solid #2a3340;border-radius:6px;color:#7c8698;"
         )
@@ -63,17 +68,10 @@ class FixedHoverPreviewPanel(QFrame):
             self.lbl_image.clear()
             self.lbl_image.setText("!")
             return
-        target_width = min(620, max(480, self.width() - 20))
-        scaled = pix.scaled(
-            target_width,
-            460,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.lbl_image.setPixmap(scaled)
+        self._apply_fit_image(pix, smooth=True)
         self.lbl_caption.setText(self._hover_name)
         if self.height() == 0:
-            self.setFixedHeight(510)
+            self.setFixedHeight(min(510, max(220, self.lbl_image.height() + 48)))
         if not self.isVisible():
             self.setWindowOpacity(0.0)
             self.setVisible(True)
@@ -104,14 +102,7 @@ class FixedHoverPreviewPanel(QFrame):
         if cached is not None and not cached.isNull():
             pix = QPixmap.fromImage(cached)
             if not pix.isNull():
-                target_width = min(620, max(480, self.width() - 20))
-                scaled = pix.scaled(
-                    target_width,
-                    460,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
-                )
-                self.lbl_image.setPixmap(scaled)
+                self._apply_fit_image(pix, smooth=False)
                 self.lbl_image.setText("")
             else:
                 self.lbl_image.clear()
@@ -129,6 +120,23 @@ class FixedHoverPreviewPanel(QFrame):
             source_path=source_path,
             filename=self._hover_name,
         )
+
+    def _apply_fit_image(self, pix: QPixmap, *, smooth: bool = True) -> None:
+        """Fit hover image to panel width only — never force 480–620px min width."""
+        target_width = max(1, int(self.width() or 1) - 20)
+        target_height = min(460, max(160, int(self.lbl_image.maximumHeight() or 460)))
+        mode = (
+            Qt.TransformationMode.SmoothTransformation
+            if smooth
+            else Qt.TransformationMode.FastTransformation
+        )
+        scaled = pix.scaled(
+            target_width,
+            target_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            mode,
+        )
+        self.lbl_image.setPixmap(scaled)
 
     def schedule_hide(self) -> None:
         self._hide_timer.start()
@@ -169,6 +177,10 @@ class InspectorDockContent(QWidget):
         super().__init__(parent)
         from ui.inspector_panel import InspectorPanel
 
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)

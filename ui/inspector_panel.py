@@ -10,12 +10,14 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -115,7 +117,11 @@ class InspectorPanel(QWidget):
         self._simple_mode = True
         self._db_path: str = ""
         self._rel_gen: int = 0
-        self.setMinimumWidth(300)
+        self._detail_source_pix: QPixmap | None = None
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
         self._build_ui()
         from ui.thumbnail_scheduler import get_thumbnail_scheduler
 
@@ -130,18 +136,35 @@ class InspectorPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tab_preview = QWidget()
+        self.tab_preview.setMinimumWidth(0)
+        self.tab_preview.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         prev_l = QVBoxLayout(self.tab_preview)
+        prev_l.setContentsMargins(0, 0, 0, 0)
         self.thumb = QLabel()
-        self.thumb.setMinimumHeight(360)
+        self.thumb.setMinimumSize(0, 160)
         self.thumb.setMaximumHeight(520)
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.thumb.setStyleSheet(
             "background:#232a35;border:1px solid #2a3340;border-radius:6px;color:#7c8698;"
         )
         self._detail_native_size: tuple[int, int] = (0, 0)
         self.lbl_preview_name = QLabel("—")
         self.lbl_preview_name.setWordWrap(True)
+        self.lbl_preview_name.setMinimumWidth(0)
+        self.lbl_preview_name.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.lbl_preview_src = QLabel("—")
+        self.lbl_preview_src.setWordWrap(True)
+        self.lbl_preview_src.setMinimumWidth(0)
+        self.lbl_preview_src.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         prev_l.addWidget(self.thumb)
         prev_l.addWidget(self.lbl_preview_name)
         prev_l.addWidget(self.lbl_preview_src)
@@ -152,7 +175,9 @@ class InspectorPanel(QWidget):
         self.lbl_ai_prediction.setWordWrap(True)
         self.lbl_ai_prediction.setStyleSheet("font-weight:600;")
         ai_l.addWidget(self.lbl_ai_prediction)
-        ai_buttons = QHBoxLayout()
+        ai_buttons = QGridLayout()
+        ai_buttons.setHorizontalSpacing(6)
+        ai_buttons.setVerticalSpacing(6)
         self.btn_ai_correct = QPushButton("Doğru")
         self.btn_ai_wrong = QPushButton("Yanlış")
         self.btn_ai_edit = QPushButton("Düzenle")
@@ -175,7 +200,13 @@ class InspectorPanel(QWidget):
         )
         for btn in (self.btn_ai_correct, self.btn_ai_wrong, self.btn_ai_edit):
             btn.setMinimumHeight(30)
-            ai_buttons.addWidget(btn)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
+        ai_buttons.addWidget(self.btn_ai_correct, 0, 0)
+        ai_buttons.addWidget(self.btn_ai_wrong, 0, 1)
+        ai_buttons.addWidget(self.btn_ai_edit, 1, 0, 1, 2)
         ai_l.addLayout(ai_buttons)
         self._ai_advanced = QWidget()
         ai_adv_l = QVBoxLayout(self._ai_advanced)
@@ -278,9 +309,10 @@ class InspectorPanel(QWidget):
         self.tabs.addTab(self._tab_source, "Kaynak / Kopyalar")
         layout.addWidget(self.tabs, stretch=1)
 
-        # Her sekmede görünür — Önizleme scroll içinde kaybolmasın
-        action_row = QHBoxLayout()
-        action_row.setSpacing(6)
+        # Her sekmede görünür — Önizleme scroll içinde kaybolmasın; wrap, yatay taşırma yok.
+        action_grid = QGridLayout()
+        action_grid.setHorizontalSpacing(6)
+        action_grid.setVerticalSpacing(6)
         self.btn_folder = QPushButton("Klasörde Aç")
         self.btn_file = QPushButton("Görseli Aç")
         self.btn_similar = QPushButton("Benzerlerini Ara")
@@ -291,9 +323,15 @@ class InspectorPanel(QWidget):
         self.btn_similar.clicked.connect(self._emit_similar)
         for btn in (self.btn_folder, self.btn_file, self.btn_similar):
             btn.setMinimumHeight(34)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
             btn.setEnabled(False)
-            action_row.addWidget(btn)
-        layout.addLayout(action_row)
+        action_grid.addWidget(self.btn_folder, 0, 0)
+        action_grid.addWidget(self.btn_file, 0, 1)
+        action_grid.addWidget(self.btn_similar, 1, 0, 1, 2)
+        layout.addLayout(action_grid)
 
         self.set_simple_mode(True)
 
@@ -331,6 +369,7 @@ class InspectorPanel(QWidget):
         QTimer.singleShot(0, lambda: self._set_result_heavy(result))
 
     def _clear_inspector(self) -> None:
+        self._detail_source_pix = None
         self.thumb.clear()
         self.lbl_preview_name.setText("Sonuç seçin…")
         self.lbl_preview_src.setText("")
@@ -495,21 +534,15 @@ class InspectorPanel(QWidget):
         if cached is not None and not cached.isNull():
             pix = QPixmap.fromImage(cached)
             if not pix.isNull():
-                self.thumb.setPixmap(
-                    pix.scaled(
-                        self.thumb.width() or 280,
-                        self.thumb.height() or 280,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.FastTransformation,
-                    )
-                )
-                self.thumb.setText("")
+                self._apply_fit_preview(pix, smooth=False)
                 self.thumb.setStyleSheet(soft_placeholder)
             else:
+                self._detail_source_pix = None
                 self.thumb.clear()
                 self.thumb.setText("···")
                 self.thumb.setStyleSheet(soft_placeholder)
         else:
+            self._detail_source_pix = None
             self.thumb.clear()
             self.thumb.setText("···")
             self.thumb.setStyleSheet(soft_placeholder)
@@ -1038,13 +1071,6 @@ class InspectorPanel(QWidget):
             return
         nw, nh = int(pix.width()), int(pix.height())
         self._detail_native_size = (nw, nh)
-        # Panel kutusu; native çözünürlüğün üstüne büyütme YOK
-        box_w = max(320, min(520, int(self.thumb.width() or 480)))
-        box_h = max(300, min(520, int(self.thumb.height() or 420)))
-        scale = min(1.0, box_w / max(nw, 1), box_h / max(nh, 1))
-        tw = max(1, int(nw * scale))
-        th = max(1, int(nh * scale))
-        self.thumb.setText("")
         meta = ""
         try:
             from ui.thumbnail_scheduler import get_thumbnail_scheduler
@@ -1058,14 +1084,7 @@ class InspectorPanel(QWidget):
             f"Detail preview: {nw}×{nh}px"
             + (f"\n{path}" if path else "")
         )
-        self.thumb.setPixmap(
-            pix.scaled(
-                tw,
-                th,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        tw, th = self._apply_fit_preview(pix, smooth=True)
         logger_msg = f"RESULT_DETAIL file_id={file_id} display={tw}x{th} native={nw}x{nh}"
         try:
             from core.logger import setup_logger
@@ -1073,3 +1092,85 @@ class InspectorPanel(QWidget):
             setup_logger(__name__).info(logger_msg)
         except Exception:
             pass
+
+    def _preview_avail_width(self) -> int:
+        """Usable width inside the preview scroll viewport (never expands the panel)."""
+        widths: list[int] = []
+        try:
+            vp = self.preview_scroll.viewport()
+            if vp is not None and int(vp.width()) > 1:
+                widths.append(int(vp.width()))
+        except Exception:
+            pass
+        # Walk parents: dock QScrollArea viewport is the hard horizontal bound.
+        try:
+            p = self.parent()
+            while p is not None:
+                if isinstance(p, QScrollArea):
+                    pvp = p.viewport()
+                    if pvp is not None and int(pvp.width()) > 1:
+                        widths.append(int(pvp.width()))
+                p = p.parent()
+        except Exception:
+            pass
+        for w in (
+            int(self.tab_preview.width() or 0),
+            int(self.thumb.width() or 0),
+            int(self.width() or 0),
+        ):
+            if w > 1:
+                widths.append(w)
+        if not widths:
+            return 1
+        return max(1, min(widths) - 8)
+
+    def _preview_avail_height(self) -> int:
+        h = int(self.thumb.height() or 0)
+        if h <= 1:
+            h = 360
+        return max(120, min(520, h))
+
+    def _constrain_text_widths(self) -> None:
+        """Cap label max width so long filenames cannot force horizontal overflow."""
+        w = max(40, self._preview_avail_width())
+        for lbl in (
+            self.lbl_preview_name,
+            self.lbl_preview_src,
+            self.lbl_ai_prediction,
+            self.lbl_pattern_dna,
+            self.lbl_ai_explanation,
+            self.lbl_relations_status,
+        ):
+            lbl.setMaximumWidth(w)
+
+    def _apply_fit_preview(
+        self, pix: QPixmap, *, smooth: bool = True
+    ) -> tuple[int, int]:
+        """Contain-fit preview into available panel width; never force panel wider."""
+        if pix.isNull():
+            return (0, 0)
+        self._constrain_text_widths()
+        self._detail_source_pix = QPixmap(pix)
+        nw, nh = int(pix.width()), int(pix.height())
+        box_w = self._preview_avail_width()
+        box_h = self._preview_avail_height()
+        # Do not upscale above native; do not use floors that expand the layout.
+        scale = min(1.0, box_w / max(nw, 1), box_h / max(nh, 1))
+        tw = max(1, int(nw * scale))
+        th = max(1, int(nh * scale))
+        mode = (
+            Qt.TransformationMode.SmoothTransformation
+            if smooth
+            else Qt.TransformationMode.FastTransformation
+        )
+        self.thumb.setText("")
+        self.thumb.setPixmap(
+            pix.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio, mode)
+        )
+        return (tw, th)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._constrain_text_widths()
+        if self._detail_source_pix is not None and not self._detail_source_pix.isNull():
+            self._apply_fit_preview(self._detail_source_pix, smooth=True)
