@@ -931,6 +931,7 @@ class ResultsPanel(QWidget):
         self._selected_file_id = int(result.file_id)
         self.scroll.set_selected_file_id(self._selected_file_id)
         self.scroll.setFocus(Qt.FocusReason.OtherFocusReason)
+        # Active result → detail preview (keyboard/click). Clear stale list-hover.
         self.result_selected.emit(result)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802

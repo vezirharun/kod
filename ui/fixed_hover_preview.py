@@ -59,17 +59,21 @@ class DetailPreviewHoverOverlay(QFrame):
         self._host._overlay_zone_leave()
 
     def paint_contain(self, pix: QPixmap) -> tuple[int, int]:
-        """Contain-fit into this overlay (already sized to canvas). Cap upscale at 1.0."""
+        """Maximize contain-fit into red-zone overlay; hi-res fills canvas."""
         if pix.isNull() or self.width() < 8 or self.height() < 8:
             self.hide()
             return (0, 0)
         aw = max(1, self.width() - 4)
         ah = max(1, self.height() - 4)
         nw, nh = int(pix.width()), int(pix.height())
-        # Do not blow up low-res thumbs beyond native pixels.
-        scale = min(1.0, aw / max(nw, 1), ah / max(nh, 1))
-        tw = max(1, int(nw * scale))
-        th = max(1, int(nh * scale))
+        native = max(nw, nh)
+        # Hi-res (≥512): fill the red zone. Tiny thumbs: no aggressive upscale.
+        if native >= 512:
+            scale = min(aw / max(nw, 1), ah / max(nh, 1))
+        else:
+            scale = min(1.0, aw / max(nw, 1), ah / max(nh, 1))
+        tw = max(1, min(aw, int(nw * scale)))
+        th = max(1, min(ah, int(nh * scale)))
         self.lbl_image.setPixmap(
             pix.scaled(
                 tw,
@@ -121,6 +125,10 @@ class FixedHoverPreviewPanel(QFrame):
         self.lbl_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_caption.setWordWrap(True)
         self.lbl_caption.setMinimumWidth(0)
+        # Children must not steal hover — otherwise panel leaveEvent hides overlay.
+        self.lbl_caption.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
         self.lbl_image = QLabel("Önizleme")
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_image.setMinimumSize(0, 160)
@@ -128,6 +136,9 @@ class FixedHoverPreviewPanel(QFrame):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
         )
         self.lbl_image.setMouseTracking(True)
+        self.lbl_image.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
         self.lbl_image.setStyleSheet(
             "background:#232a35;border:1px solid #2a3340;border-radius:6px;color:#7c8698;"
         )
@@ -197,6 +208,14 @@ class FixedHoverPreviewPanel(QFrame):
         )
         return tw, th
 
+    def end_list_hover_override(self) -> None:
+        """End temporary list-hover so active selection drives the canvas."""
+        self._list_hide_timer.stop()
+        self._list_hovering = False
+        self._hover_token = 0
+        self._hover_path = ""
+        self._hover_name = ""
+
     def set_selection_pixmap(
         self,
         pix: QPixmap,
@@ -212,44 +231,48 @@ class FixedHoverPreviewPanel(QFrame):
         if pix.isNull():
             return (0, 0)
         self._selection_pix = QPixmap(pix)
-        if not self._list_hovering:
-            self.lbl_caption.setText(self._selection_name or "Önizleme")
-            if tooltip:
-                self.lbl_image.setToolTip(tooltip)
-            result = self._apply_fit_image(pix, smooth=smooth, fill=_CANVAS_FILL)
-            if self._overlay_visible:
-                self._show_overlay()
-            return result
-        return (0, 0)
+        # ACTIVE RESULT wins over temporary list hover (keyboard / click sync).
+        if self._list_hovering:
+            self.end_list_hover_override()
+        self.lbl_caption.setText(self._selection_name or "Önizleme")
+        if tooltip:
+            self.lbl_image.setToolTip(tooltip)
+        result = self._apply_fit_image(pix, smooth=smooth, fill=_CANVAS_FILL)
+        if self._overlay_visible:
+            self._show_overlay()
+        return result
 
     def clear_selection(self) -> None:
         self._selection_token = 0
         self._selection_name = ""
         self._selection_pix = None
+        self.end_list_hover_override()
         self._hide_overlay(immediate=True)
-        if not self._list_hovering:
-            self.lbl_image.clear()
-            self.lbl_image.setText("Önizleme")
-            self.lbl_image.setToolTip("")
-            self.lbl_caption.setText("Sonuç seçin…")
+        self.lbl_image.clear()
+        self.lbl_image.setText("Önizleme")
+        self.lbl_image.setToolTip("")
+        self.lbl_caption.setText("Sonuç seçin…")
 
     def set_selection_pending(self, file_id: int, filename: str) -> None:
         self._selection_token = int(file_id)
         self._selection_name = filename or ""
+        # Immediate canvas feedback on ↑/↓ — do not keep stale list-hover frame.
+        if self._list_hovering:
+            self.end_list_hover_override()
         self._hide_overlay(immediate=True)
-        if not self._list_hovering:
-            self.lbl_caption.setText(self._selection_name or "Yükleniyor…")
-            self.lbl_image.setText("···")
+        self.lbl_caption.setText(self._selection_name or "Yükleniyor…")
+        self.lbl_image.setText("···")
 
     def set_selection_failed(self, file_id: int, filename: str, reason: str) -> None:
         if int(file_id) != int(self._selection_token):
             return
         self._hide_overlay(immediate=True)
-        if not self._list_hovering:
-            self.lbl_image.clear()
-            self.lbl_image.setText("!")
-            self.lbl_image.setToolTip(reason)
-            self.lbl_caption.setText(filename or self._selection_name)
+        if self._list_hovering:
+            return
+        self.lbl_image.clear()
+        self.lbl_image.setText("!")
+        self.lbl_image.setToolTip(reason)
+        self.lbl_caption.setText(filename or self._selection_name)
 
     def _on_thumb_ready(self, file_id: int, image, size: int) -> None:
         if not self._list_hovering:
@@ -371,8 +394,11 @@ class FixedHoverPreviewPanel(QFrame):
         return self._overlay
 
     def _canvas_rect(self) -> QRect:
-        """Red-area geometry: lbl_image in panel coordinates."""
-        return QRect(self.lbl_image.geometry())
+        """Kırmızı alan = Result Detail üst preview paneli (contents)."""
+        r = self.contentsRect()
+        if r.width() < 32 or r.height() < 32:
+            return QRect(self.lbl_image.geometry())
+        return QRect(r)
 
     def _show_overlay(self) -> None:
         """STATE 3 — paint hi-res preview inside the Result Detail canvas only."""

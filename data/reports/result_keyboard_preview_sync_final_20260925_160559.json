@@ -1,0 +1,28 @@
+{
+  "report_id": "result_keyboard_preview_sync_final_20260925_160559",
+  "timestamp": "20260925_160559",
+  "commit_message": "fix: sync keyboard results with detail preview and canvas hover",
+  "keyboard_to_preview": "navigate_by -> card_selected -> _select_result -> _show_result_detail -> set_selection_pixmap",
+  "list_hover": "temporary show_thumbnail; cleared by selection/keyboard",
+  "canvas_hover": {
+    "parent": "FixedHoverPreviewPanel",
+    "geometry": "contentsRect (red zone)",
+    "source": "max(selection, detail cache, peek)",
+    "fit": "maximize contain-fit; hi-res>=512 fills"
+  },
+  "bugfixes": [
+    "selection paint blocked by list_hovering",
+    "lbl_image stole mouse causing leave/hide",
+    "overlay now full panel red zone"
+  ],
+  "tests": {"passed": 42, "failed": 0},
+  "files_changed": [
+    "ui/fixed_hover_preview.py",
+    "ui/main_window.py",
+    "ui/results_panel.py",
+    "tests/test_result_keyboard_preview_sync_final.py",
+    "tests/test_detail_hover_position_resolution.py",
+    "tests/test_detail_preview_second_level_hover.py",
+    "tests/test_result_keyboard_navigation.py"
+  ]
+}

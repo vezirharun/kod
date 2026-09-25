@@ -79,7 +79,7 @@ class TestDetailPreviewSecondLevelHover(unittest.TestCase):
         self._app.processEvents()
         self.assertTrue(p._overlay_visible)
         # In-canvas overlay: same geometry as lbl_image; hi-res source.
-        self.assertEqual(p._overlay.geometry(), p.lbl_image.geometry())
+        self.assertEqual(p._overlay.geometry(), p._canvas_rect())
         used = p._overlay_source_pix()
         self.assertGreaterEqual(used.width(), 512)
 

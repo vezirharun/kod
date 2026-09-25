@@ -73,7 +73,7 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
         self._app.processEvents()
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
-        self.assertEqual(p._overlay.geometry(), p.lbl_image.geometry())
+        self.assertEqual(p._overlay.geometry(), p._canvas_rect())
 
     def test_detail_hover_preview_not_centered_in_main_window(self):
         from PySide6.QtCore import QPointF
@@ -86,8 +86,8 @@ class TestDetailHoverPositionResolution(unittest.TestCase):
         p.enterEvent(QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
         self._app.processEvents()
         ov = p._overlay
-        # Overlay is child of panel — its top-left in window coords equals canvas.
-        canvas_tl = p.lbl_image.mapTo(win, p.lbl_image.rect().topLeft())
+        # Overlay top-left in window coords = panel contents (red zone).
+        canvas_tl = p.mapTo(win, p._canvas_rect().topLeft())
         ov_tl = ov.mapTo(win, ov.rect().topLeft())
         self.assertEqual(ov_tl, canvas_tl)
         # Not floating over central widget center.

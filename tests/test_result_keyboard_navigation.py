@@ -215,22 +215,16 @@ class TestResultKeyboardNavigation(unittest.TestCase):
         self.assertEqual(panel._selected_file_id, 1)
 
     def test_arrow_navigation_preserves_hover_preview(self):
-        """Keyboard selection must not clear list-hover API; hover remains independent."""
+        """List-hover is temporary; selection apply ends it (keyboard priority)."""
+        from PySide6.QtGui import QPixmap
+
         from ui.fixed_hover_preview import FixedHoverPreviewPanel
 
         p = FixedHoverPreviewPanel()
-        p.set_selection_pixmap(
-            __import__("PySide6.QtGui", fromlist=["QPixmap"]).QPixmap(100, 100),
-            file_id=1,
-            filename="sel.jpg",
-        )
+        p.set_selection_pixmap(QPixmap(100, 100), file_id=1, filename="sel.jpg")
         p.show_thumbnail(9, "/t/h.jpg", "hover.jpg")
         self.assertTrue(p._list_hovering)
-        # Keyboard updates selection underneath without inventing new hover system
-        p.set_selection_pixmap(
-            __import__("PySide6.QtGui", fromlist=["QPixmap"]).QPixmap(100, 100),
-            file_id=2,
-            filename="02.jpg",
-        )
+        p.set_selection_pixmap(QPixmap(100, 100), file_id=2, filename="02.jpg")
         self.assertEqual(p._selection_token, 2)
-        self.assertTrue(p._list_hovering)
+        self.assertFalse(p._list_hovering)
+        self.assertEqual(p.lbl_caption.text(), "02.jpg")

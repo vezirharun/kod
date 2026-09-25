@@ -1640,6 +1640,11 @@ class MainWindow(QMainWindow):
             apply_metadata_overlay_to_result,
         )
 
+        # Keyboard/click active result is source of truth for the right canvas.
+        try:
+            self._hover_preview_panel.end_list_hover_override()
+        except Exception:
+            pass
         try:
             overlay = UserFeedbackStore(
                 Database(self.settings.db_path)
