@@ -17,9 +17,13 @@ from PySide6.QtWidgets import (
 
 from ui.theme import configure_dock_scroll_area
 
+# Selection preview: normal is inset; mouse-over fills the canvas (contain-fit).
+_NORMAL_FILL = 0.78
+_MAGNIFY_FILL = 1.0
+
 
 class FixedHoverPreviewPanel(QFrame):
-    """Sağ dock üstündeki ANA önizleme alanı (seçim + geçici hover)."""
+    """Sağ dock üstündeki ANA önizleme alanı (seçim + geçici liste hover)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -28,6 +32,7 @@ class FixedHoverPreviewPanel(QFrame):
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self.setMouseTracking(True)
         self._source_pix: QPixmap | None = None
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -53,6 +58,7 @@ class FixedHoverPreviewPanel(QFrame):
         self.lbl_image.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
         )
+        self.lbl_image.setMouseTracking(True)
         self.lbl_image.setStyleSheet(
             "background:#232a35;border:1px solid #2a3340;border-radius:6px;color:#7c8698;"
         )
@@ -65,7 +71,8 @@ class FixedHoverPreviewPanel(QFrame):
         self._selection_token = 0
         self._selection_name = ""
         self._selection_pix: QPixmap | None = None
-        self._hovering = False
+        self._list_hovering = False  # results-list card hover (other file)
+        self._canvas_magnified = False  # mouse over this canvas → enlarge selection
 
         from ui.thumbnail_scheduler import get_thumbnail_scheduler
 
@@ -75,7 +82,6 @@ class FixedHoverPreviewPanel(QFrame):
     def _avail_box(self) -> tuple[int, int]:
         w = max(1, int(self.lbl_image.width() or self.width() or 1) - 4)
         h = max(1, int(self.lbl_image.height() or self.height() or 1) - 4)
-        # Parent scroll/dock bound
         p = self.parent()
         while p is not None:
             if isinstance(p, QScrollArea) and p.viewport() is not None:
@@ -86,13 +92,28 @@ class FixedHoverPreviewPanel(QFrame):
             p = p.parent()
         return w, h
 
-    def _apply_fit_image(self, pix: QPixmap, *, smooth: bool = True) -> tuple[int, int]:
-        """Contain-fit into the large preview canvas; never expand the dock."""
+    def _current_fill(self) -> float:
+        if self._list_hovering:
+            return _MAGNIFY_FILL
+        return _MAGNIFY_FILL if self._canvas_magnified else _NORMAL_FILL
+
+    def _apply_fit_image(
+        self,
+        pix: QPixmap,
+        *,
+        smooth: bool = True,
+        fill: float | None = None,
+    ) -> tuple[int, int]:
+        """Contain-fit cached pixmap into canvas; never expand the dock / open files."""
         if pix.isNull():
             return (0, 0)
         self._source_pix = QPixmap(pix)
         nw, nh = int(pix.width()), int(pix.height())
         box_w, box_h = self._avail_box()
+        f = _NORMAL_FILL if fill is None else float(fill)
+        f = max(0.05, min(1.0, f))
+        box_w = max(1, int(box_w * f))
+        box_h = max(1, int(box_h * f))
         scale = min(1.0, box_w / max(nw, 1), box_h / max(nh, 1))
         tw = max(1, int(nw * scale))
         th = max(1, int(nh * scale))
@@ -116,25 +137,28 @@ class FixedHoverPreviewPanel(QFrame):
         tooltip: str = "",
         smooth: bool = True,
     ) -> tuple[int, int]:
-        """Selected result → permanent main preview."""
+        """Selected result → permanent main preview (cached pixmap only)."""
         self._selection_token = int(file_id or self._selection_token or 0)
         if filename:
             self._selection_name = filename
         if pix.isNull():
             return (0, 0)
         self._selection_pix = QPixmap(pix)
-        if not self._hovering:
+        if not self._list_hovering:
             self.lbl_caption.setText(self._selection_name or "Önizleme")
             if tooltip:
                 self.lbl_image.setToolTip(tooltip)
-            return self._apply_fit_image(pix, smooth=smooth)
+            return self._apply_fit_image(
+                pix, smooth=smooth, fill=self._current_fill()
+            )
         return (0, 0)
 
     def clear_selection(self) -> None:
         self._selection_token = 0
         self._selection_name = ""
         self._selection_pix = None
-        if not self._hovering:
+        self._canvas_magnified = False
+        if not self._list_hovering:
             self.lbl_image.clear()
             self.lbl_image.setText("Önizleme")
             self.lbl_image.setToolTip("")
@@ -143,22 +167,22 @@ class FixedHoverPreviewPanel(QFrame):
     def set_selection_pending(self, file_id: int, filename: str) -> None:
         self._selection_token = int(file_id)
         self._selection_name = filename or ""
-        if not self._hovering:
+        self._canvas_magnified = False
+        if not self._list_hovering:
             self.lbl_caption.setText(self._selection_name or "Yükleniyor…")
             self.lbl_image.setText("···")
 
     def set_selection_failed(self, file_id: int, filename: str, reason: str) -> None:
         if int(file_id) != int(self._selection_token):
             return
-        if not self._hovering:
+        if not self._list_hovering:
             self.lbl_image.clear()
             self.lbl_image.setText("!")
             self.lbl_image.setToolTip(reason)
             self.lbl_caption.setText(filename or self._selection_name)
 
     def _on_thumb_ready(self, file_id: int, image, size: int) -> None:
-        # Hover uses smaller requests; selection detail comes via InspectorPanel host API.
-        if not self._hovering:
+        if not self._list_hovering:
             return
         if int(file_id) != int(self._hover_token):
             return
@@ -172,7 +196,7 @@ class FixedHoverPreviewPanel(QFrame):
             self.lbl_image.clear()
             self.lbl_image.setText("!")
             return
-        self._apply_fit_image(pix, smooth=True)
+        self._apply_fit_image(pix, smooth=True, fill=_MAGNIFY_FILL)
         self.lbl_caption.setText(self._hover_name)
 
     def show_thumbnail(
@@ -183,11 +207,12 @@ class FixedHoverPreviewPanel(QFrame):
         *,
         source_path: str = "",
     ) -> None:
-        """Geçici hover — seçim önizlemesini bozmadan üstte gösterir."""
+        """Geçici sonuç-listesi hover — seçim önizlemesini bozmadan üstte gösterir."""
         self._hide_timer.stop()
         if not thumbnail_path and not source_path:
             return
-        self._hovering = True
+        self._list_hovering = True
+        self._canvas_magnified = False
         self._hover_path = thumbnail_path
         self._hover_name = filename or Path(thumbnail_path or source_path).name
         self._hover_token = int(file_id)
@@ -198,7 +223,7 @@ class FixedHoverPreviewPanel(QFrame):
         if cached is not None and not cached.isNull():
             pix = QPixmap.fromImage(cached)
             if not pix.isNull():
-                self._apply_fit_image(pix, smooth=False)
+                self._apply_fit_image(pix, smooth=False, fill=_MAGNIFY_FILL)
                 self.lbl_image.setText("")
             else:
                 self.lbl_image.clear()
@@ -223,22 +248,52 @@ class FixedHoverPreviewPanel(QFrame):
         self._hide_timer.stop()
 
     def _restore_selection(self) -> None:
-        self._hovering = False
+        self._list_hovering = False
         self._hover_token = 0
         if self._selection_pix is not None and not self._selection_pix.isNull():
             self.lbl_caption.setText(self._selection_name or "Önizleme")
-            self._apply_fit_image(self._selection_pix, smooth=True)
+            self._apply_fit_image(
+                self._selection_pix,
+                smooth=True,
+                fill=self._current_fill(),
+            )
         elif self._selection_token:
             self.lbl_caption.setText(self._selection_name or "Yükleniyor…")
             self.lbl_image.setText("···")
         else:
             self.clear_selection()
 
+    def enterEvent(self, event) -> None:  # noqa: N802
+        super().enterEvent(event)
+        # Canvas magnify: selection pixmap only — never open files / external apps.
+        if self._list_hovering:
+            return
+        if self._selection_pix is None or self._selection_pix.isNull():
+            return
+        if self._canvas_magnified:
+            return
+        self._canvas_magnified = True
+        self._apply_fit_image(
+            self._selection_pix, smooth=True, fill=_MAGNIFY_FILL
+        )
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        super().leaveEvent(event)
+        if not self._canvas_magnified:
+            return
+        self._canvas_magnified = False
+        if self._list_hovering:
+            return
+        if self._selection_pix is not None and not self._selection_pix.isNull():
+            self._apply_fit_image(
+                self._selection_pix, smooth=True, fill=_NORMAL_FILL
+            )
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         pix = getattr(self, "_source_pix", None)
         if pix is not None and not pix.isNull():
-            self._apply_fit_image(pix, smooth=True)
+            self._apply_fit_image(pix, smooth=True, fill=self._current_fill())
 
 
 class InspectorDockContent(QWidget):
