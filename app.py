@@ -13,6 +13,11 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# OpenCV harden BEFORE any transitive cv2 import (V3/torch heap corruption).
+from core.cv2_runtime import harden_cv2_runtime
+
+harden_cv2_runtime()
+
 from core.logger import setup_logger
 from ui.main_window import run_app
 

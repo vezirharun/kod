@@ -11,7 +11,12 @@ from typing import Any
 import numpy as np
 
 try:
-    import cv2
+    from core.cv2_runtime import harden_cv2_runtime
+
+    # Harden sets OPENCV_OPENCL_DEVICE before cv2 first-import.
+    if not harden_cv2_runtime():
+        raise ImportError('cv2 unavailable')
+    import cv2  # noqa: F401
 
     HAS_CV2 = True
 except ImportError:
