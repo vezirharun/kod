@@ -1,4 +1,4 @@
-"""Görsel özellik çıkarma — hash, renk, doku, AI embedding."""
+﻿"""Görsel özellik çıkarma — hash, renk, doku, AI embedding."""
 
 from __future__ import annotations
 
@@ -20,17 +20,9 @@ try:
 except ImportError:
     HAS_IMAGEHASH = False
 
-try:
-    from core.cv2_runtime import harden_cv2_runtime
-
-    # Harden sets OPENCV_OPENCL_DEVICE before cv2 first-import.
-    if not harden_cv2_runtime():
-        raise ImportError('cv2 unavailable')
-    import cv2  # noqa: F401
-
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
+# Intentionally NO cv2 on this path — avoids 0xC0000374 with torch/DINO/CLIP.
+# Color/texture use core.safe_image_ops (numpy/sklearn).
+HAS_CV2 = False
 
 # AI modelleri — opsiyonel
 HAS_TORCH = False
@@ -346,29 +338,9 @@ class FeatureExtractor:
 
     def _compute_color(self, image: np.ndarray) -> tuple[bytes, list[list[int]]]:
         try:
-            if HAS_CV2:
-                hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-                hist_h = cv2.calcHist([hsv], [0], None, [32], [0, 180])
-                hist_s = cv2.calcHist([hsv], [1], None, [32], [0, 256])
-                hist_v = cv2.calcHist([hsv], [2], None, [32], [0, 256])
-                cv2.normalize(hist_h, hist_h)
-                cv2.normalize(hist_s, hist_s)
-                cv2.normalize(hist_v, hist_v)
-                combined = np.concatenate(
-                    [hist_h.flatten(), hist_s.flatten(), hist_v.flatten()]
-                )
-            else:
-                small = image[::4, ::4].reshape(-1, 3)
-                combined = (
-                    np.histogramdd(
-                        small,
-                        bins=(16, 16, 16),
-                        range=((0, 256), (0, 256), (0, 256)),
-                    )[0]
-                    .flatten()
-                    .astype(np.float32)
-                )
-                combined = combined / (combined.sum() + 1e-8)
+            from core.safe_image_ops import hsv_hist_rgb
+
+            combined = hsv_hist_rgb(image, 32, 32, 32)
 
             dominant = self._dominant_colors(image)
             return combined.astype(np.float32).tobytes(), dominant
@@ -389,37 +361,31 @@ class FeatureExtractor:
         small = image[::8, ::8].reshape(-1, 3).astype(np.float32)
         if len(small) < k:
             return small.astype(int).tolist()
-        if HAS_CV2:
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-            _, labels, centers = cv2.kmeans(
-                small, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS
-            )
-            counts = np.bincount(labels.flatten(), minlength=k)
-            order = np.argsort(-counts)
-            return [centers[i].astype(int).tolist() for i in order]
-        return small[:k].astype(int).tolist()
+        from core.safe_image_ops import kmeans_centers
+
+        centers, labels = kmeans_centers(small, k)
+        if len(centers) == 0:
+            return small[:k].astype(int).tolist()
+        counts = np.bincount(labels.flatten(), minlength=len(centers))
+        order = np.argsort(-counts)
+        return [centers[i].astype(int).tolist() for i in order]
 
     def _texture_core(self, image: np.ndarray) -> tuple[list[float], np.ndarray]:
         """Contrast/brightness/edge/laplacian — same numbers as _compute_texture."""
-        if HAS_CV2:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = np.dot(image[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        from core.safe_image_ops import edge_density as _edge_density
+        from core.safe_image_ops import laplacian_var, rgb_to_gray
+
+        gray = rgb_to_gray(image)
         contrast = float(np.std(gray))
         brightness = float(np.mean(gray))
-        if HAS_CV2:
-            edges = cv2.Canny(gray, 50, 150)
-            edge_density = float(np.count_nonzero(edges)) / edges.size
-            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        else:
-            edge_density = 0.0
-            lap_var = 0.0
+        edge_density = _edge_density(gray)
+        lap_var = laplacian_var(gray)
         return [contrast, brightness, edge_density, lap_var], gray
 
     def _compute_texture(self, image: np.ndarray) -> list[float]:
         try:
             core, gray = self._texture_core(image)
-            lbp = self._simple_lbp(gray) if HAS_CV2 else 0.0
+            lbp = self._simple_lbp(gray)
             return core + [lbp]
         except Exception as exc:
             logger.warning("Doku özelliği hatası: %s", exc)

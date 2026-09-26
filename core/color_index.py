@@ -6,17 +6,8 @@ from typing import Any
 
 import numpy as np
 
-try:
-    from core.cv2_runtime import harden_cv2_runtime
-
-    # Harden sets OPENCV_OPENCL_DEVICE before cv2 first-import.
-    if not harden_cv2_runtime():
-        raise ImportError('cv2 unavailable')
-    import cv2  # noqa: F401
-
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
+# No cv2 — HSV hist via safe_image_ops / pure numpy.
+HAS_CV2 = False
 
 # Moda renk adı → RGB prototip + aile
 FASHION_COLOR_PROTOTYPES: dict[str, tuple[tuple[int, int, int], str]] = {
@@ -164,15 +155,11 @@ def classify_family(r: float, g: float, b: float) -> str:
 def compute_hsv_histogram(image: np.ndarray) -> list[float]:
     """Normalize HSV histogram (H32+S16+V16 = 64 float)."""
     try:
-        if HAS_CV2:
-            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-            h = cv2.calcHist([hsv], [0], None, [32], [0, 180]).flatten()
-            s = cv2.calcHist([hsv], [1], None, [16], [0, 256]).flatten()
-            v = cv2.calcHist([hsv], [2], None, [16], [0, 256]).flatten()
-            for arr in (h, s, v):
-                total = float(arr.sum()) + 1e-8
-                arr /= total
-            return [round(float(x), 5) for x in np.concatenate([h, s, v])]
+        from core.safe_image_ops import hsv_hist_rgb
+
+        hist = hsv_hist_rgb(image, 32, 16, 16)
+        if hist.size:
+            return [round(float(x), 5) for x in hist]
         small = image[::8, ::8].reshape(-1, 3).astype(np.float32)
         hs = [_rgb_to_hsv(float(p[0]), float(p[1]), float(p[2])) for p in small]
         h_vals = [x[0] for x in hs]

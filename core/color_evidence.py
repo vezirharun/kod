@@ -26,17 +26,8 @@ try:
 except ImportError:
     HAS_NP = False
 
-try:
-    from core.cv2_runtime import harden_cv2_runtime
-
-    # Harden sets OPENCV_OPENCL_DEVICE before cv2 first-import.
-    if not harden_cv2_runtime():
-        raise ImportError('cv2 unavailable')
-    import cv2  # noqa: F401
-
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
+# No cv2 — palette clustering via safe_image_ops (heap-safe with torch).
+HAS_CV2 = False
 
 try:
     from PIL import Image
@@ -171,34 +162,16 @@ def extract_palette_clusters(
         if len(small) < 2:
             return [], []
         kk = min(int(k), len(small))
-        if HAS_CV2 and kk >= 2:
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-            _compact, labels, centers = cv2.kmeans(
-                small, kk, None, criteria, 3, cv2.KMEANS_PP_CENTERS
-            )
-            counts = np.bincount(labels.flatten(), minlength=kk).astype(np.float64)
-            order = np.argsort(-counts)
-            total = float(counts.sum()) or 1.0
-            clusters = [centers[i].astype(int).tolist() for i in order]
-            weights = [float(counts[i] / total) for i in order]
-            return clusters, weights
-        # Fallback: unique sampled colors by frequency (no fake equal weights)
-        rounded = np.round(small / 8.0).astype(int) * 8
-        # pack RGB
-        keys = (
-            (rounded[:, 0].astype(np.int32) << 16)
-            | (rounded[:, 1].astype(np.int32) << 8)
-            | rounded[:, 2].astype(np.int32)
-        )
-        uniq, counts = np.unique(keys, return_counts=True)
-        order = np.argsort(-counts)[:kk]
-        total = float(counts[order].sum()) or 1.0
-        clusters = []
-        weights = []
-        for i in order:
-            key = int(uniq[i])
-            clusters.append([(key >> 16) & 255, (key >> 8) & 255, key & 255])
-            weights.append(float(counts[i] / total))
+        from core.safe_image_ops import kmeans_centers
+
+        centers, labels = kmeans_centers(small, kk)
+        if len(centers) == 0:
+            return [], []
+        counts = np.bincount(labels.flatten(), minlength=len(centers)).astype(np.float64)
+        order = np.argsort(-counts)
+        total = float(counts.sum()) or 1.0
+        clusters = [centers[i].astype(int).tolist() for i in order]
+        weights = [float(counts[i] / total) for i in order]
         return clusters, weights
     except Exception:
         return [], []

@@ -10,17 +10,8 @@ from typing import Any
 
 import numpy as np
 
-try:
-    from core.cv2_runtime import harden_cv2_runtime
-
-    # Harden sets OPENCV_OPENCL_DEVICE before cv2 first-import.
-    if not harden_cv2_runtime():
-        raise ImportError('cv2 unavailable')
-    import cv2  # noqa: F401
-
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
+# No cv2 — gray/edge/blob/scale via safe_image_ops (heap-safe with torch).
+HAS_CV2 = False
 
 # Sürüm — indexer ile senkron
 TEXTURE_MAP_VERSION = 3
@@ -350,32 +341,21 @@ class TextureAnalyzer:
 
     @staticmethod
     def _to_gray(rgb: np.ndarray) -> np.ndarray:
-        if HAS_CV2:
-            return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        return np.dot(rgb[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        from core.safe_image_ops import rgb_to_gray
+
+        return rgb_to_gray(rgb)
 
     @staticmethod
     def _edge_density(gray: np.ndarray) -> float:
-        if HAS_CV2:
-            edges = cv2.Canny(gray, 50, 150)
-            return float(np.count_nonzero(edges)) / max(edges.size, 1)
-        return float(np.std(gray)) / 128.0 * 0.5
+        from core.safe_image_ops import edge_density
+
+        return edge_density(gray)
 
     @staticmethod
     def _blob_score(gray: np.ndarray) -> float:
-        if not HAS_CV2 or gray.shape[0] < 32:
-            return 0.0
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        contours, _ = cv2.findContours(
-            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return 0.0
-        areas = [cv2.contourArea(c) for c in contours]
-        total = gray.shape[0] * gray.shape[1]
-        small_blobs = sum(1 for a in areas if 0.001 * total < a < 0.05 * total)
-        return min(1.0, small_blobs / 25.0)
+        from core.safe_image_ops import blob_score
+
+        return blob_score(gray)
 
     @staticmethod
     def _stripe_score(gray: np.ndarray) -> float:
@@ -388,25 +368,19 @@ class TextureAnalyzer:
             return 0.0
         stripe = abs(gx - gy) / (gx + gy)
         # FFT yüksek frekans şeritleri
-        if HAS_CV2:
-            f = np.fft.fft2(gray.astype(np.float32))
-            fshift = np.fft.fftshift(f)
-            mag = np.log1p(np.abs(fshift))
-            cy, cx = mag.shape[0] // 2, mag.shape[1] // 2
-            band = mag[cy - 5 : cy + 5, :].mean() / (mag.mean() + 1e-6)
-            stripe = min(1.0, stripe * 0.6 + min(1.0, band / 10.0) * 0.4)
+        f = np.fft.fft2(gray.astype(np.float32))
+        fshift = np.fft.fftshift(f)
+        mag = np.log1p(np.abs(fshift))
+        cy, cx = mag.shape[0] // 2, mag.shape[1] // 2
+        band = mag[cy - 5 : cy + 5, :].mean() / (mag.mean() + 1e-6)
+        stripe = min(1.0, stripe * 0.6 + min(1.0, band / 10.0) * 0.4)
         return float(min(1.0, stripe))
 
     @staticmethod
     def _scale_score(gray: np.ndarray) -> float:
-        if not HAS_CV2 or gray.shape[0] < 32:
-            return 0.0
-        small = cv2.resize(gray, (64, 64))
-        lap = cv2.Laplacian(small, cv2.CV_64F)
-        local_var = cv2.blur(lap**2, (8, 8))
-        cells = (local_var > local_var.mean()).astype(np.uint8)
-        # Hücresel tekrar yoğunluğu
-        return min(1.0, float(cells.mean()) * 1.8)
+        from core.safe_image_ops import scale_score
+
+        return scale_score(gray)
 
     @staticmethod
     def _repeat_density(gray: np.ndarray) -> float:
@@ -442,16 +416,10 @@ class TextureAnalyzer:
             sample = pixels[::step]
             if len(sample) < 10:
                 return "unknown", []
-            if HAS_CV2:
-                _, _, centers = cv2.kmeans(
-                    sample,
-                    min(5, len(sample)),
-                    None,
-                    (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0),
-                    3,
-                    cv2.KMEANS_PP_CENTERS,
-                )
-            else:
+            from core.safe_image_ops import kmeans_centers
+
+            centers, _labels = kmeans_centers(sample, min(5, len(sample)))
+            if len(centers) == 0:
                 centers = sample[:5]
 
         palette: list[str] = []
