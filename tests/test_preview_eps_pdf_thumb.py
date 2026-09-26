@@ -256,3 +256,48 @@ def test_scheduler_try_create_returns_error_tuple():
 
     src = inspect.getsource(ts._LoadRunnable._try_create)
     assert "tuple[str, str]" in src or "Return (thumbnail_path" in src
+
+def test_eps_never_calls_inprocess_pymupdf(tmp_path: Path):
+    """P0: EPS must not open via in-process PyMuPDF (heap corruption)."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    src = tmp_path / "safe.eps"
+    src.write_text("%!PS-Adobe-3.0 EPSF-3.0\n")
+    gs_fail = RenderResult(
+        success=False,
+        error="ghostscript_render_error:gs rc=1: fail",
+        unsupported_preview=False,
+    )
+    with patch(
+        "core.preview_renderer._try_pymupdf",
+        side_effect=AssertionError("pymupdf must not be called for .eps"),
+    ), patch(
+        "core.preview_renderer._try_ghostscript", return_value=gs_fail
+    ):
+        r = render_preview_for_index(str(src), str(cache))
+    assert r.success is False
+    assert "ghostscript_render_error" in (r.error or "")
+    assert "pymupdf" not in (r.error or "").lower() or "skipped" in (r.error or "").lower()
+
+
+def test_ai_non_pdf_skips_pymupdf(tmp_path: Path):
+    """Non-PDF .ai must not call in-process PyMuPDF."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    src = tmp_path / "legacy.ai"
+    src.write_bytes(b"%!PS-Adobe-3.0\n%%Creator: Adobe Illustrator\n")
+    gs_fail = RenderResult(
+        success=False,
+        error="ghostscript_render_error:gs rc=1: fail",
+        unsupported_preview=False,
+    )
+    with patch(
+        "core.preview_renderer._try_pymupdf",
+        side_effect=AssertionError("pymupdf must not be called for non-PDF .ai"),
+    ), patch(
+        "core.preview_renderer._try_ghostscript", return_value=gs_fail
+    ):
+        r = render_preview_for_index(str(src), str(cache))
+    assert r.success is False
+    assert "ghostscript_render_error" in (r.error or "")
+

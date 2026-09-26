@@ -22,6 +22,16 @@ class RenderResult:
     renderer: str = ""
 
 
+def _looks_like_pdf(source: str) -> bool:
+    """True when file starts with %PDF (PDF-compatible .ai etc.)."""
+    try:
+        with open(source, "rb") as fh:
+            head = fh.read(16)
+        return head.lstrip().startswith(b"%PDF")
+    except OSError:
+        return False
+
+
 def _try_pymupdf(source: str, out_path: Path) -> RenderResult:
     try:
         import fitz  # PyMuPDF
@@ -407,51 +417,79 @@ def render_preview_for_index(source_path: str, cache_dir: str) -> RenderResult:
         return _try_ghostscript(access, out_path)
 
     if ext in (".eps", ".ai"):
-        # Birçok .ai dosyası PDF uyumludur — fallback zinciri korunur.
-        r_mu = _try_pymupdf(access, out_path)
-        if r_mu.success:
-            vok, vreason = _eps_ai_preview_gate(r_mu.image_path or out_path)
-            if vok:
-                return r_mu
-            _unlink_bad_preview(out_path)
-            r_mu = RenderResult(
-                success=False, error=vreason, unsupported_preview=False
-            )
+        # P0 NATIVE CRASH (2026-09-26): in-process MuPDF on EPS caused
+        # STATUS_HEAP_CORRUPTION (0xC0000374) — faulting thread stack had
+        # _mupdf.pyd; WER Report.wer + data/crash_dumps/python.exe.20172.dmp.
+        # Ghostscript is out-of-process; never open pure EPS via PyMuPDF.
+        # PDF-compatible .ai may still use PyMuPDF after a %PDF header check.
+        r_mu = RenderResult(
+            success=False,
+            error="pymupdf_skipped_eps",
+            unsupported_preview=False,
+        )
+        if ext == ".ai" and _looks_like_pdf(access):
+            r_mu = _try_pymupdf(access, out_path)
+            if r_mu.success:
+                vok, vreason = _eps_ai_preview_gate(r_mu.image_path or out_path)
+                if vok:
+                    return r_mu
+                _unlink_bad_preview(out_path)
+                r_mu = RenderResult(
+                    success=False, error=vreason, unsupported_preview=False
+                )
         r_gs = _try_ghostscript(access, out_path)
         if r_gs.success:
             return r_gs
 
         mu_err = (r_mu.error or "").strip()
         gs_err = (r_gs.error or "").strip()
-        mu_missing = mu_err.lower() in ("pymupdf yok",) or mu_err.lower().startswith(
-            "pymupdf yok"
+        mu_skipped = mu_err == "pymupdf_skipped_eps"
+        mu_missing = (not mu_skipped) and (
+            mu_err.lower() in ("pymupdf yok",)
+            or mu_err.lower().startswith("pymupdf yok")
         )
         gs_missing = "dependency eksik" in gs_err.lower() or (
             "ghostscript" in gs_err.lower() and "yok" in gs_err.lower()
         )
         # Blank/invalid preview is never renderer_missing.
         # renderer_missing ONLY when executable/library truly absent.
+        # EPS intentionally skips PyMuPDF — GS absence alone is renderer_missing.
+        if gs_missing and (mu_missing or mu_skipped or ext == ".eps"):
+            need = (
+                "Ghostscript"
+                if ext == ".eps" or mu_skipped
+                else "Ghostscript veya PyMuPDF"
+            )
+            return RenderResult(
+                success=False,
+                error=f"renderer_missing:EPS/AI render için {need} gerekli",
+                unsupported_preview=True,
+            )
         if mu_missing and gs_missing:
             return RenderResult(
                 success=False,
                 error="renderer_missing:EPS/AI render için Ghostscript veya PyMuPDF gerekli",
                 unsupported_preview=True,
             )
-        # Prefer concrete root cause (GS present ⇒ never renderer_missing).
+        # Prefer concrete root cause (GS present → never renderer_missing).
         parts: list[str] = []
-        if mu_err and not mu_missing:
+        if mu_err and not mu_missing and not mu_skipped:
             parts.append(mu_err)
         if gs_err and not gs_missing:
             parts.append(gs_err)
-        elif gs_missing and not mu_missing:
+        elif gs_missing and not mu_missing and not mu_skipped:
             parts.append(gs_err)
         elif mu_missing and not gs_missing:
             parts.append(mu_err)
         if not parts:
-            parts = [gs_err or mu_err or "eps_ai_render_failed"]
+            parts = [
+                gs_err
+                or (mu_err if not mu_skipped else "")
+                or "eps_ai_render_failed"
+            ]
         return RenderResult(
             success=False,
-            error="; ".join(parts)[:500],
+            error="; ".join(p for p in parts if p)[:500],
             unsupported_preview=False,
         )
 
