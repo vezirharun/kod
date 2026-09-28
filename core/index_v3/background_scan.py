@@ -135,13 +135,26 @@ class BackgroundIndexScan:
 
     def _purge_missing_records(self) -> None:
         try:
-            n = int(self.db.purge_missing_files() or 0)
+            cache_dir = None
+            if self.settings is not None:
+                cache_dir = str(getattr(self.settings, "cache_dir", "") or "").strip() or None
+            n = int(self.db.purge_missing_files(cache_dir=cache_dir) or 0)
             self.stats.purged_missing += n
         except Exception:
             try:
+                cache_dir = None
+                if self.settings is not None:
+                    cache_dir = (
+                        str(getattr(self.settings, "cache_dir", "") or "").strip() or None
+                    )
+                artifact_paths = (
+                    self.db.list_file_artifact_paths(missing_only=True) if cache_dir else []
+                )
                 with self.db.connect() as conn:
                     cur = conn.execute("DELETE FROM files WHERE status='missing'")
                     self.stats.purged_missing += int(cur.rowcount or 0)
+                if cache_dir and artifact_paths:
+                    self.db.remove_cache_artifacts(artifact_paths, cache_dir)
             except Exception as exc:
                 self.stats.last_error = f"purge:{exc}"[:300]
 

@@ -142,8 +142,9 @@ class SourceSidebar(QWidget):
             "Klasör değişikliklerini izle (ekle/sil → hızlı tara)"
         )
         self.chk_folder_watch.setToolTip(
-            "Kaynak kök klasörlerinde dosya eklenince veya silinince birkaç saniye içinde "
-            "hızlı index tetiklenir. Ağ paylaşımlarında her zaman çalışmayabilir."
+            "Kaynak klasöründe bir dosya silinince index kaydı, önizleme önbelleği ve "
+            "bekleyen işler hemen temizlenir. Yeni dosyalar için hızlı tarama da tetiklenir. "
+            "Ağ paylaşımlarında her zaman çalışmayabilir."
         )
         lay.addWidget(self.chk_folder_watch)
         self.chk_purge_missing = QCheckBox(
