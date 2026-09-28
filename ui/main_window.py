@@ -1077,6 +1077,7 @@ class MainWindow(QMainWindow):
         )
         self.source_sidebar.purge_missing_clicked.connect(self._purge_missing_records)
         self._folder_watch.scan_requested.connect(self._on_folder_watch_scan)
+        self._folder_watch.files_purged.connect(self._on_folder_watch_purged)
 
         self.search_header.search_clicked.connect(self._run_current_search)
 
@@ -1720,6 +1721,14 @@ class MainWindow(QMainWindow):
             self.source_sidebar.is_purge_missing_after_scan_enabled()
         )
         self.settings.save()
+
+    def _on_folder_watch_purged(self, removed: int) -> None:
+        count = int(removed or 0)
+        if count <= 0:
+            return
+        self.status_bar.set_message(
+            f"Diskten silinen {count} dosya index'ten kaldırıldı"
+        )
 
     def _on_folder_watch_scan(self, source_id: int, reason: str) -> None:
         if source_id <= 0:
